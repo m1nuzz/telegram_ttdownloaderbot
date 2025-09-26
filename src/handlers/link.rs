@@ -25,6 +25,10 @@ pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, 
     };
 
     if text.contains("tiktok.com") {
+        let username: Option<String> = match msg.chat.username() {
+            Some(un) => Some(un.to_string()),
+            None => msg.from.clone().and_then(|u| u.username.clone()),
+        };
         let mut progress_bar = ProgressBar::new(bot.clone(), msg.chat.id);
         progress_bar.start("🎬 Starting...").await?;
 
@@ -100,9 +104,9 @@ pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, 
                     };
                     // Actual download without progress
                     let upload_result = if is_audio {
-                        mtproto_uploader.upload_audio(msg.chat.id.0, &path, text, &mut ProgressBar::new_silent()).await
+                        mtproto_uploader.upload_audio(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
                     } else {
-                        mtproto_uploader.upload_video(msg.chat.id.0, &path, text, &mut ProgressBar::new_silent()).await
+                        mtproto_uploader.upload_video(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
                     };
                     // Stop simulation and chat action
                     progress_simulation.abort();

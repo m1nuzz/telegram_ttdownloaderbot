@@ -4,6 +4,43 @@ use teloxide::types::ChatId;
 use crate::utils::progress_bar::ProgressBar;
 use crate::utils::progress_reader::ProgressReader;
 use tokio_util::io::ReaderStream;
+use tokio::process::Command;
+use std::path::Path;
+use anyhow;
+use log;
+
+async fn ensure_faststart_video(file_path: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    // Create a temporary file for the faststart-optimized video
+    let temp_dir = std::env::temp_dir();
+    let file_name = file_path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("temp.mp4");
+    let temp_path = temp_dir.join(format!("faststart_{}", file_name));
+
+    let output = Command::new("ffmpeg")
+        .arg("-i")
+        .arg(file_path)
+        .arg("-c")
+        .arg("copy")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(&temp_path)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("ffmpeg faststart remux failed: {}", stderr);
+        return Err(anyhow::anyhow!("ffmpeg faststart remux failed: {}", stderr).into());
+    }
+
+    Ok(temp_path)
+}
+
+async fn get_video_metadata(ffprobe_path: &str, file_path: &Path) -> Result<crate::mtproto_uploader::video_metadata::Stream, Box<dyn std::error::Error + Send + Sync>> {
+    // Reuse the existing function from mtproto_uploader
+    crate::mtproto_uploader::metadata::get_video_metadata(ffprobe_path, file_path).await.map_err(|e| e.into())
+}
 
 pub async fn send_video_with_progress_botapi(
     bot_token: &str,
@@ -12,7 +49,41 @@ pub async fn send_video_with_progress_botapi(
     caption: Option<&str>,
     progress_bar: &mut ProgressBar,
 ) -> anyhow::Result<()> {
-    let file = File::open(file_path).await?;
+    // Get ffprobe path (using the same approach as in main.rs)
+    let libraries_dir = std::env::current_dir()? // Consider making this configurable or user-specific
+        .join("lib");
+    let ffmpeg_dir = libraries_dir.join("ffmpeg");
+    let ffprobe_path = ffmpeg_dir.join(if cfg!(target_os = "windows") { "ffprobe.exe" } else { "ffprobe" });
+    let ffprobe_path_str = ffprobe_path.to_string_lossy();
+
+    // First, remux with faststart
+    let (video_path, needs_cleanup) = if file_path.extension().map_or(false, |ext| ext == "mp4") {
+        match ensure_faststart_video(file_path).await {
+            Ok(temp_path) => (temp_path, true), // Use processed video and mark for cleanup
+            Err(e) => {
+                log::warn!("Failed to remux video with faststart for Bot API, proceeding with original: {:?}", e);
+                (file_path.to_path_buf(), false) // Use original file and no cleanup needed
+            }
+        }
+    } else {
+        (file_path.to_path_buf(), false) // Use original file and no cleanup needed
+    };
+
+    // Get video metadata
+    let meta = get_video_metadata(&ffprobe_path_str, &video_path).await.map_err(|e| {
+        log::warn!("Failed to get video metadata, proceeding without: {:?}", e);
+        e
+    }).unwrap_or_else(|_| crate::mtproto_uploader::video_metadata::Stream {
+        width: 0,
+        height: 0,
+        duration: 0.0,
+    });
+
+    // Generate thumbnail
+    let thumbnail_path = video_path.with_extension("jpg");
+    let thumbnail_result = crate::mtproto_uploader::thumbnail::generate_thumbnail(&video_path, &thumbnail_path).await;
+    
+    let file = File::open(&video_path).await?;
     let len = file.metadata().await?.len();
 
     // 80..=100% - actual Bot API upload
@@ -32,13 +103,31 @@ pub async fn send_video_with_progress_botapi(
     let stream_reader = ReaderStream::new(reader);
 
     let part = Part::stream_with_length(reqwest::Body::wrap_stream(stream_reader), len)
-        .file_name(file_path.file_name().unwrap().to_string_lossy().to_string())
+        .file_name(video_path.file_name().unwrap().to_string_lossy().to_string())
         .mime_str("video/mp4")?;
 
-    let form = Form::new()
+    let mut form = Form::new()
         .text("chat_id", chat_id.0.to_string())
         .part("video", part)
         .text("supports_streaming", "true");
+
+    // Add width and height if available
+    if meta.width > 0 {
+        form = form.text("width", meta.width.to_string());
+    }
+    if meta.height > 0 {
+        form = form.text("height", meta.height.to_string());
+    }
+    if meta.duration > 0.0 {
+        form = form.text("duration", meta.duration.floor().to_string());
+    }
+
+    // Add thumbnail if successfully generated
+    if thumbnail_result.is_ok() {
+        if let Ok(thumb_part) = Part::file(&thumbnail_path).await.map(|p| p.mime_str("image/jpeg").unwrap()) {
+            form = form.part("thumbnail", thumb_part);
+        }
+    }
 
     let form = if let Some(c) = caption {
         form.text("caption", c.to_string())
@@ -54,6 +143,16 @@ pub async fn send_video_with_progress_botapi(
 
     // Success: hide progress bar immediately
     progress_bar.delete().await?;
+    
+    // Clean up temporary files
+    if needs_cleanup {
+        tokio::fs::remove_file(&video_path).await?;
+    }
+    
+    if thumbnail_result.is_ok() {
+        tokio::fs::remove_file(&thumbnail_path).await?;
+    }
+    
     Ok(())
 }
 

@@ -10,15 +10,15 @@ use crate::utils::progress_bar::ProgressBar;
 pub struct YoutubeFetcher {
     pub yt_dlp_path: PathBuf,
     pub output_dir: PathBuf,
-    pub libraries_dir: PathBuf,
+    pub ffmpeg_dir: PathBuf,
 }
 
 impl YoutubeFetcher {
-    pub fn new(yt_dlp_path: PathBuf, output_dir: PathBuf, libraries_dir: PathBuf) -> Result<Self> {
+    pub fn new(yt_dlp_path: PathBuf, output_dir: PathBuf, ffmpeg_dir: PathBuf) -> Result<Self> {
         Ok(YoutubeFetcher {
             yt_dlp_path,
             output_dir,
-            libraries_dir,
+            ffmpeg_dir,
         })
     }
 
@@ -37,9 +37,7 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
            .arg("--no-part")
            .arg("--no-mtime")
            .arg("--ffmpeg-location")
-           .arg(self.libraries_dir.join("ffmpeg").join(
-               if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" }
-           ))
+           .arg(&self.ffmpeg_dir)
            .arg(&url)
            .arg("--progress")
            .arg("--newline")

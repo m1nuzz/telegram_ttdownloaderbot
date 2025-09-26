@@ -14,6 +14,7 @@ pub async fn ensure_binaries(libraries_dir: &Path, output_dir: &Path) -> Result<
     let ffmpeg_zip_path = libraries_dir.join("ffmpeg-release.zip");
     let ffmpeg_dir_path = libraries_dir.join("ffmpeg");
     let ffmpeg_path = ffmpeg_dir_path.join(if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" });
+    let ffprobe_path = ffmpeg_dir_path.join(if cfg!(target_os = "windows") { "ffprobe.exe" } else { "ffprobe" });
 
     // Check and download/update yt-dlp
     if !is_executable_present(&yt_dlp_path) {
@@ -32,70 +33,65 @@ pub async fn ensure_binaries(libraries_dir: &Path, output_dir: &Path) -> Result<
         log::info!("yt-dlp already exists at {:?}", yt_dlp_path);
     }
 
-    // Check and download/update ffmpeg
-    if !is_executable_present(&ffmpeg_path) {
-        log::info!("ffmpeg not found, downloading latest version...");
+    // Check and download/update ffmpeg and ffprobe
+    if !is_executable_present(&ffmpeg_path) || !is_executable_present(&ffprobe_path) {
+        log::info!("FFmpeg or FFprobe not found, downloading latest version...");
         
         if cfg!(target_os = "windows") {
             // Download the zip file for Windows
             let ffmpeg_url = get_latest_ffmpeg_url();
             download_file(&ffmpeg_url, &ffmpeg_zip_path).await?;
             
-            // Extract ffmpeg.exe from the zip file
+            // Extract ffmpeg.exe and ffprobe.exe from the zip file
             fs::create_dir_all(&ffmpeg_dir_path).await?;
             
             extract_ffmpeg_windows(&ffmpeg_zip_path, &ffmpeg_dir_path).await?;
             
-            // After extraction, verify that ffmpeg.exe exists in the expected location
+            // After extraction, verify that ffmpeg.exe and ffprobe.exe exist in the expected location
             if !is_executable_present(&ffmpeg_path) {
                 log::error!("ffmpeg.exe was not found in the expected location after extraction: {:?}", ffmpeg_path);
-                log::info!("Contents of ffmpeg directory: {:?}", 
-                    {
-                        let mut entries = fs::read_dir(&ffmpeg_dir_path).await?;
-                        let mut paths = Vec::new();
-                        while let Some(entry) = entries.next_entry().await? {
-                            paths.push(entry.path());
-                        }
-                        paths
-                    }
-                );
-                
-                // Try to find ffmpeg.exe in the extracted directory structure
-                let extracted_ffmpeg = find_ffmpeg_in_extracted_dir(&ffmpeg_dir_path).await;
+                let extracted_ffmpeg = find_binary_in_extracted_dir(&ffmpeg_dir_path, "ffmpeg.exe").await;
                 if let Some(found_path) = extracted_ffmpeg {
                     log::info!("Found ffmpeg at {:?}, copying to expected location", found_path);
                     fs::create_dir_all(ffmpeg_path.parent().unwrap()).await?;
                     fs::copy(&found_path, &ffmpeg_path).await?;
                 }
             }
+            if !is_executable_present(&ffprobe_path) {
+                log::error!("ffprobe.exe was not found in the expected location after extraction: {:?}", ffprobe_path);
+                let extracted_ffprobe = find_binary_in_extracted_dir(&ffmpeg_dir_path, "ffprobe.exe").await;
+                if let Some(found_path) = extracted_ffprobe {
+                    log::info!("Found ffprobe at {:?}, copying to expected location", found_path);
+                    fs::create_dir_all(ffprobe_path.parent().unwrap()).await?;
+                    fs::copy(&found_path, &ffprobe_path).await?;
+                }
+            }
         } else {
             // For non-Windows (Linux/Android/MacOS), we might need a different approach
-            // For now, just download the appropriate binary
-            log::info!("Downloading ffmpeg for non-Windows platform...");
+            log::info!("Downloading FFmpeg and FFprobe for non-Windows platform...");
             let ffmpeg_url = get_latest_ffmpeg_url();
             
             // Create directory for ffmpeg
             fs::create_dir_all(ffmpeg_path.parent().unwrap()).await?;
             
-            // For now, just download the tar.xz file and we'll assume it contains ffmpeg
+            // For now, just download the tar.xz file and we'll assume it contains ffmpeg and ffprobe
             // In practice, you might need to handle different extraction based on the archive type
             download_file(&ffmpeg_url, &ffmpeg_path.with_extension("tar.xz")).await?;
             
-            // For Termux on Android, ffmpeg might need to be installed differently
+            // For Termux on Android, ffmpeg/ffprobe might need to be installed differently
             if cfg!(target_os = "linux") {
-                log::info!("For Linux/Android systems, you might need to install ffmpeg manually or use package manager");
+                log::info!("For Linux/Android systems, you might need to install ffmpeg/ffprobe manually or use package manager");
                 log::info!("You can install ffmpeg with: apt install ffmpeg (in Termux) or equivalent package manager");
             }
         }
     } else {
-        log::info!("ffmpeg already exists at {:?}", ffmpeg_path);
+        log::info!("FFmpeg and FFprobe already exist at {:?} and {:?}", ffmpeg_path, ffprobe_path);
     }
-
     Ok(())
 }
 
 // Helper function to find ffmpeg.exe in the extracted directory structure
-pub async fn find_ffmpeg_in_extracted_dir(base_dir: &PathBuf) -> Option<PathBuf> {
+pub async fn find_binary_in_extracted_dir(base_dir: &PathBuf, binary_name: &str) -> Option<PathBuf> {
     let mut stack = vec![base_dir.clone()];
     
     while let Some(current_dir) = stack.pop() {
@@ -105,7 +101,7 @@ pub async fn find_ffmpeg_in_extracted_dir(base_dir: &PathBuf) -> Option<PathBuf>
                     let path = entry.path();
                     
                     if path.is_file() && 
-                       path.file_name().map_or(false, |name| name == "ffmpeg.exe") {
+                       path.file_name().map_or(false, |name| name == binary_name) {
                         return Some(path);
                     } else if path.is_dir() {
                         stack.push(path);
