@@ -11,10 +11,57 @@ pub fn init_database() -> Result<()> {
     // Add the quality_preference column to the users table if it doesn't exist, ignoring the error if it does.
     let _ = conn.execute("ALTER TABLE users ADD COLUMN quality_preference TEXT DEFAULT 'h264'", ());
 
+    // Create the table with the new format
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS downloads (id INTEGER PRIMARY KEY, user_id INTEGER, video_url TEXT NOT NULL, download_date DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users (id))",
+        "CREATE TABLE IF NOT EXISTS downloads (id INTEGER PRIMARY KEY, user_telegram_id BIGINT, video_url TEXT NOT NULL, download_date DATETIME DEFAULT CURRENT_TIMESTAMP)",
         (),
     )?;
+    
+    // Check if the old format table exists
+    let has_old_format: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='downloads' AND sql LIKE '%user_id INTEGER%'",
+        (),
+        |row| row.get(0)
+    ).unwrap_or(0) > 0;
+    
+    if has_old_format {
+        // Check if we need to migrate (if there's data in the old format)
+        let has_data: bool = conn.query_row(
+            "SELECT COUNT(*) FROM downloads",
+            (),
+            |row| row.get(0)
+        ).unwrap_or(0) > 0;
+        
+        if has_data {
+            // Create a temporary table with the new structure
+            conn.execute(
+                "CREATE TEMPORARY TABLE downloads_migrated AS SELECT d.id, u.telegram_id as user_telegram_id, d.video_url, d.download_date FROM downloads d JOIN users u ON d.user_id = u.id",
+                (),
+            )?;
+            
+            // Drop the old table
+            conn.execute("DROP TABLE downloads", ())?;
+            
+            // Recreate with new format
+            conn.execute(
+                "CREATE TABLE downloads (id INTEGER PRIMARY KEY, user_telegram_id BIGINT, video_url TEXT NOT NULL, download_date DATETIME DEFAULT CURRENT_TIMESTAMP)",
+                (),
+            )?;
+            
+            // Copy data from temporary table
+            conn.execute(
+                "INSERT INTO downloads (id, user_telegram_id, video_url, download_date) SELECT id, user_telegram_id, video_url, download_date FROM downloads_migrated",
+                (),
+            )?;
+        } else {
+            // If no data in old format, just drop and recreate
+            conn.execute("DROP TABLE downloads", ())?;
+            conn.execute(
+                "CREATE TABLE downloads (id INTEGER PRIMARY KEY, user_telegram_id BIGINT, video_url TEXT NOT NULL, download_date DATETIME DEFAULT CURRENT_TIMESTAMP)",
+                (),
+            )?;
+        }
+    }
     conn.execute(
         "CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, admin_telegram_id BIGINT UNIQUE NOT NULL)",
         (),
@@ -45,7 +92,8 @@ pub fn update_user_activity(user_id: i64) -> Result<()> {
 pub fn log_download(telegram_id: i64, video_url: &str) -> Result<()> {
     let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
     let conn = Connection::open(db_path)?;
-    let user_id: i64 = conn.query_row("SELECT id FROM users WHERE telegram_id = ?1", [telegram_id], |row| row.get(0))?;
-    conn.execute("INSERT INTO downloads (user_id, video_url) VALUES (?1, ?2)", (user_id, video_url))?;
+    // Update user activity first (to ensure the user exists in the database)
+    update_user_activity(telegram_id)?;
+    conn.execute("INSERT INTO downloads (user_telegram_id, video_url) VALUES (?1, ?2)", (telegram_id, video_url))?;
     Ok(())
 }
