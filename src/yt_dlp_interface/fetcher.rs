@@ -47,7 +47,7 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
            .stdout(std::process::Stdio::piped())
            .stderr(std::process::Stdio::piped());
 
-        match quality.as_str() {
+        match quality {
             "h265" => {
                 // Сортировка: предпочитаем высокое разрешение, битрейт и h265 (hevc)
                 cmd.arg("--format-sort").arg("res,br,vcodec:hevc");
