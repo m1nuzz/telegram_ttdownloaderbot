@@ -6,10 +6,11 @@ use crate::utils::progress_reader::ProgressReader;
 use tokio_util::io::ReaderStream;
 use tokio::process::Command;
 use std::path::Path;
+use std::path::PathBuf;
 use anyhow;
 use log;
 
-async fn ensure_faststart_video(file_path: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+async fn ensure_faststart_video(ffmpeg_path: &PathBuf, file_path: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     // Create a temporary file for the faststart-optimized video
     let temp_dir = std::env::temp_dir();
     let file_name = file_path.file_name()
@@ -17,7 +18,7 @@ async fn ensure_faststart_video(file_path: &Path) -> Result<std::path::PathBuf, 
         .unwrap_or("temp.mp4");
     let temp_path = temp_dir.join(format!("faststart_{}", file_name));
 
-    let output = Command::new("ffmpeg")
+    let output = Command::new(ffmpeg_path)
         .arg("-i")
         .arg(file_path)
         .arg("-c")
@@ -49,16 +50,17 @@ pub async fn send_video_with_progress_botapi(
     caption: Option<&str>,
     progress_bar: &mut ProgressBar,
 ) -> anyhow::Result<()> {
-    // Get ffprobe path (using the same approach as in main.rs)
+    // Get paths for ffmpeg and ffprobe (using the same approach as in main.rs)
     let libraries_dir = std::env::current_dir()? // Consider making this configurable or user-specific
         .join("lib");
     let ffmpeg_dir = libraries_dir.join("ffmpeg");
+    let ffmpeg_path = ffmpeg_dir.join(if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" });
     let ffprobe_path = ffmpeg_dir.join(if cfg!(target_os = "windows") { "ffprobe.exe" } else { "ffprobe" });
     let ffprobe_path_str = ffprobe_path.to_string_lossy();
 
     // First, remux with faststart
     let (video_path, needs_cleanup) = if file_path.extension().map_or(false, |ext| ext == "mp4") {
-        match ensure_faststart_video(file_path).await {
+        match ensure_faststart_video(&ffmpeg_path, file_path).await {
             Ok(temp_path) => (temp_path, true), // Use processed video and mark for cleanup
             Err(e) => {
                 log::warn!("Failed to remux video with faststart for Bot API, proceeding with original: {:?}", e);
@@ -81,7 +83,7 @@ pub async fn send_video_with_progress_botapi(
 
     // Generate thumbnail
     let thumbnail_path = video_path.with_extension("jpg");
-    let thumbnail_result = crate::mtproto_uploader::thumbnail::generate_thumbnail(&video_path, &thumbnail_path).await;
+    let thumbnail_result = crate::mtproto_uploader::thumbnail::generate_thumbnail(&ffmpeg_path, &video_path, &thumbnail_path).await;
     
     let file = File::open(&video_path).await?;
     let len = file.metadata().await?.len();

@@ -2,11 +2,14 @@ use tokio::process::Command;
 use std::path::Path;
 use anyhow::anyhow;
 
+use std::path::PathBuf;
+
 pub async fn generate_thumbnail(
+    ffmpeg_path: &PathBuf,
     video_path: &Path,
     output_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let output = Command::new("ffmpeg")
+    let output = Command::new(ffmpeg_path)
         .arg("-y") // Overwrite output files without asking
         .arg("-ss") // Seek to position
         .arg("0.1") // 0.1 seconds into the video
@@ -36,7 +39,7 @@ pub async fn generate_thumbnail(
         quality += 2; // Increase quality (lower value means higher quality, so increase to lower quality)
         log::warn!("Thumbnail size {}KB exceeds 200KB, re-compressing with quality {}", thumbnail_size / 1024, quality);
 
-        let output = Command::new("ffmpeg")
+        let output = Command::new(ffmpeg_path)
             .arg("-y")
             .arg("-i")
             .arg(video_path) // Use original video to generate new thumbnail

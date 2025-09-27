@@ -178,7 +178,7 @@ async fn main() -> Result<(), Error> {
 
     let fetcher = Arc::new(YoutubeFetcher::new(yt_dlp_path, output_dir.clone(), ffmpeg_dir.clone())?);
     let bot_token = env::var("TELOXIDE_TOKEN").expect("TELOXIDE_TOKEN must be set");
-    let mtproto_uploader = match MTProtoUploader::new(&bot_token, ffprobe_path.clone()).await {
+    let mtproto_uploader = match MTProtoUploader::new(&bot_token, ffprobe_path.clone(), ffmpeg_path.clone()).await {
         Ok(uploader) => Arc::new(uploader),
         Err(e) => {
             log::error!("Failed to create MTProtoUploader: {}", e);

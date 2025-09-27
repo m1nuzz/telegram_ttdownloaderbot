@@ -3,7 +3,6 @@ use tokio::fs;
 use tokio::io;
 use zip::ZipArchive;
 use anyhow::Result;
-use std::io::Read;
 
 #[cfg(target_os = "macos")]
 use sevenz_rust::decompress_file as decompress_7z;

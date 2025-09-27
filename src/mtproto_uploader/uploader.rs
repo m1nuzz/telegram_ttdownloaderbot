@@ -10,10 +10,11 @@ use crate::mtproto_uploader::constants::SESSION_FILE;
 pub struct MTProtoUploader {
     pub client: Client,
     pub ffprobe_path: PathBuf,
+    pub ffmpeg_path: PathBuf,
 }
 
 impl MTProtoUploader {
-    pub async fn new(bot_token: &str, ffprobe_path: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn new(bot_token: &str, ffprobe_path: PathBuf, ffmpeg_path: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let api_id: i32 = env::var("TELEGRAM_API_ID")?.parse()?;
         let api_hash = env::var("TELEGRAM_API_HASH")?;
 
@@ -30,6 +31,6 @@ impl MTProtoUploader {
         }
         client.session().save_to_file(SESSION_FILE)?;
 
-        Ok(Self { client, ffprobe_path })
+        Ok(Self { client, ffprobe_path, ffmpeg_path })
     }
 }

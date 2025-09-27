@@ -19,7 +19,7 @@ impl MTProtoUploader {
             .unwrap_or("temp.mp4");
         let temp_path = temp_dir.join(format!("faststart_{}", file_name));
 
-        let output = Command::new("ffmpeg")
+        let output = Command::new(&self.ffmpeg_path)
             .arg("-i")
             .arg(file_path)
             .arg("-c")
@@ -74,7 +74,7 @@ impl MTProtoUploader {
 
         // Generate and upload thumbnail
         let thumbnail_path = file_path.with_extension("jpg");
-        generate_thumbnail(file_path, &thumbnail_path).await.map_err(|e| {
+        generate_thumbnail(&self.ffmpeg_path, file_path, &thumbnail_path).await.map_err(|e| {
             log::error!("Failed to generate thumbnail for {:?}: {:?}", file_path, e);
             e
         })?;
