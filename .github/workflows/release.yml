@@ -1,0 +1,74 @@
+name: Build and Release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x86_64
+            bin: tiktokdownloader.exe
+            archive: tiktokdownloader-x86_64-pc-windows-msvc.zip
+            archive_cmd: powershell -Command "Compress-Archive -Path dist\* -DestinationPath dist\${{ matrix.archive }}"
+          - os: ubuntu-24.04
+            name: linux-x86_64
+            bin: tiktokdownloader
+            archive: tiktokdownloader-x86_64-unknown-linux-gnu.tar.gz
+            archive_cmd: tar -C dist -czf dist/${{ matrix.archive }} .
+          - os: macos-13
+            name: macos-x86_64
+            bin: tiktokdownloader
+            archive: tiktokdownloader-x86_64-apple-darwin.tar.gz
+            archive_cmd: tar -C dist -czf dist/${{ matrix.archive }} .
+          - os: macos-14
+            name: macos-arm64
+            bin: tiktokdownloader
+            archive: tiktokdownloader-aarch64-apple-darwin.tar.gz
+            archive_cmd: tar -C dist -czf dist/${{ matrix.archive }} .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release
+      - name: Prepare dist
+        shell: bash
+        run: |
+          mkdir -p dist
+          # Бинарник
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/release/${{ matrix.bin }}" dist/
+          else
+            cp "target/release/${{ matrix.bin }}" dist/
+            chmod +x "dist/${{ matrix.bin }}"
+          fi
+          # Полезные файлы
+          [ -f README.md ] && cp README.md dist/
+          [ -f .env.example ] && cp .env.example dist/
+      - name: Package
+        run: ${{ matrix.archive_cmd }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.archive }}
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.archive }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
