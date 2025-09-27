@@ -21,7 +21,7 @@ pub struct AutoUpdater {
 }
 
 impl AutoUpdater {
-    pub fn new(libraries_dir: PathBuf, check_interval_hours: u64) -> Self {
+    pub fn new(libraries_dir: PathBuf, check_interval_minutes: u64) -> Self {
         let mut binaries = HashMap::new();
 
         // Конфигурация для yt-dlp
@@ -45,14 +45,14 @@ impl AutoUpdater {
             download_url_template: if cfg!(target_os = "windows") {
                 "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip".to_string()
             } else {
-                "https://johnvansickle.com/ffmpeg/releases/ffmpeg-git-amd64-static.tar.xz".to_string()
+                "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz".to_string()
             },
         });
 
         Self {
             binaries,
             version_manager: VersionManager::new(libraries_dir.join(".versions")),
-            check_interval: Duration::from_secs(check_interval_hours * 3600),
+            check_interval: Duration::from_secs(check_interval_minutes * 60),
         }
     }
 
@@ -245,8 +245,8 @@ impl AutoUpdater {
     }
 
     pub async fn start_periodic_checks(&self) -> Result<()> {
-        info!("Starting periodic update checks every {} hours",
-            self.check_interval.as_secs() / 3600);
+        info!("Starting periodic update checks every {} minutes",
+            self.check_interval.as_secs() / 60);
         let mut interval = interval(self.check_interval);
         
         loop {

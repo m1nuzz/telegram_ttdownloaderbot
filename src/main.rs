@@ -29,44 +29,71 @@ mod auto_update;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Initialize both console and file logging
-    // Set up custom logger to capture errors to a file
+    // --- Logging Setup ---
+    use log::LevelFilter;
     use std::sync::Mutex;
     use std::fs::OpenOptions;
-    use log::LevelFilter;
+    use std::io::Write;
 
-    // Create a shared file handle for error logging
-    let error_log_file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open("bot_errors.log")?;
-    
-    let error_log_file = std::sync::Arc::new(Mutex::new(error_log_file));
-    
-    // Set up logging to output to both console and file for errors
+    // 1. Get console log level from env
+    let console_level_str = env::var("CONSOLE_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
+    let console_level = match console_level_str.to_uppercase().as_str() {
+        "ERROR" => LevelFilter::Error,
+        _ => LevelFilter::Info, // Default to Info
+    };
+
+    // 2. Get file log level from env
+    let file_level_str = env::var("FILE_LOG_LEVEL").unwrap_or_else(|_| "OFF".to_string());
+    let file_level_config = match file_level_str.to_uppercase().as_str() {
+        "ERROR" => Some(LevelFilter::Error),
+        "ALL" | "INFO" => Some(LevelFilter::Info),
+        _ => None, // OFF
+    };
+
+    // 3. Determine the most verbose level needed overall for the logger to process
+    let max_level = std::cmp::max(
+        console_level,
+        file_level_config.unwrap_or(LevelFilter::Off)
+    );
+
+    // 4. Setup file handle if needed
+    let log_file = if file_level_config.is_some() {
+        let file = OpenOptions::new().create(true).write(true).append(true).open("bot_errors.log")?;
+        Some(Arc::new(Mutex::new(file)))
+    } else {
+        None
+    };
+
+    // 5. Build the logger
     let mut builder = pretty_env_logger::formatted_builder();
     builder
+        .filter(None, max_level) // Set logger to the most verbose level required
         .format(move |buf, record| {
-            use std::io::Write;
-            let output = format!(
+            let formatted_record = format!(
                 "{} [{}] {}: {}",
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                 record.level(),
                 record.target(),
                 record.args()
             );
-            
-            // For error messages, also write to the error log file
-            if record.level() == log::Level::Error {
-                if let Ok(mut file) = error_log_file.try_lock() {
-                    let _ = writeln!(file, "{}", &output);
+
+            // Write to console if level is sufficient
+            if record.level() <= console_level {
+                writeln!(buf, "{}", formatted_record)?;
+            }
+
+            // Write to file if level is sufficient
+            if let Some(file_level) = file_level_config {
+                if record.level() <= file_level {
+                    if let Some(file_handle) = &log_file {
+                        if let Ok(mut guard) = file_handle.lock() {
+                            let _ = writeln!(guard, "{}", formatted_record);
+                        }
+                    }
                 }
             }
-            
-            writeln!(buf, "{}", &output)
+            Ok(())
         })
-        .filter(None, LevelFilter::Info)
         .init();
     
     log::info!("Starting TikTok downloader bot...");
@@ -116,7 +143,7 @@ async fn main() -> Result<(), Error> {
     }
 
     // Настройка автообновления ПОСЛЕ ensure_binaries
-    let auto_updater = Arc::new(auto_update::AutoUpdater::new(libraries_dir.clone(), 2)); // Проверка каждые 2 часа
+    let auto_updater = Arc::new(auto_update::AutoUpdater::new(libraries_dir.clone(), 30)); // Проверка каждые 30 минут
     
     // Первоначальная проверка обновлений
     if let Err(e) = auto_updater.check_for_updates().await {

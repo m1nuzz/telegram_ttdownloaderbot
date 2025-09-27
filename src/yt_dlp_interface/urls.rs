@@ -17,9 +17,8 @@ pub fn get_latest_ffmpeg_url() -> String {
     if cfg!(target_os = "windows") {
         "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip".to_string()
     } else if cfg!(target_os = "linux") {
-        // For Linux (including Android/Termux), we'll use a different approach
-        // as static builds for Android might need to be handled differently
-        "https://johnvansickle.com/ffmpeg/releases/ffmpeg-git-amd64-static.tar.xz".to_string()
+        // For Linux, use the correct path for git builds from johnvansickle.com
+        "https://johnvansickle.com/ffmpeg/builds/ffmpeg-git-amd64-static.tar.xz".to_string()
     } else {
         "https://evermeet.cx/ffmpeg/get/ffmpeg/7z".to_string() // For macOS as fallback
     }
