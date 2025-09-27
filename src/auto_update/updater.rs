@@ -1,0 +1,205 @@
+use std::path::PathBuf;
+use std::collections::HashMap;
+use tokio::{fs, time::{interval, Duration}};
+use anyhow::Result;
+use log::{info, warn, error};
+use feed_rs::parser;
+use crate::auto_update::version_manager::VersionManager;
+use crate::yt_dlp_interface::downloader::download_file;
+
+#[derive(Debug, Clone)]
+pub struct BinaryConfig {
+    pub rss_url: String,
+    pub binary_path: PathBuf,
+    pub download_url_template: String, // GitHub URL template
+}
+
+pub struct AutoUpdater {
+    binaries: HashMap<String, BinaryConfig>,
+    version_manager: VersionManager,
+    check_interval: Duration,
+}
+
+impl AutoUpdater {
+    pub fn new(libraries_dir: PathBuf, check_interval_hours: u64) -> Self {
+        let mut binaries = HashMap::new();
+
+        // Конфигурация для yt-dlp
+        binaries.insert("yt-dlp".to_string(), BinaryConfig {
+            rss_url: "https://github.com/yt-dlp/yt-dlp/releases.atom".to_string(),
+            binary_path: libraries_dir.join(if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" }),
+            download_url_template: if cfg!(target_os = "windows") {
+                "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp.exe".to_string()
+            } else if cfg!(target_os = "linux") {
+                "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp_linux".to_string()
+            } else {
+                "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp_macos".to_string()
+            },
+        });
+
+        // Конфигурация для FFmpeg
+        let ffmpeg_dir = libraries_dir.join("ffmpeg");
+        binaries.insert("ffmpeg".to_string(), BinaryConfig {
+            rss_url: "https://github.com/BtbN/FFmpeg-Builds/releases.atom".to_string(),
+            binary_path: ffmpeg_dir.join(if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" }),
+            download_url_template: if cfg!(target_os = "windows") {
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/{}/ffmpeg-master-latest-win64-gpl.zip".to_string()
+            } else {
+                "https://johnvansickle.com/ffmpeg/releases/ffmpeg-git-amd64-static.tar.xz".to_string()
+            },
+        });
+
+        Self {
+            binaries,
+            version_manager: VersionManager::new(libraries_dir.join(".versions")),
+            check_interval: Duration::from_secs(check_interval_hours * 3600),
+        }
+    }
+
+    // Парсинг RSS фида для получения последней версии
+    async fn get_latest_version_from_rss(&self, rss_url: &str) -> Result<String> {
+        let response = reqwest::get(rss_url).await?;
+        let content = response.text().await?;
+        let feed = parser::parse(content.as_bytes())?;
+
+        if let Some(entry) = feed.entries.first() {
+            // Извлекаем версию из title или link
+            let version = entry.title.as_ref().map(|t| t.content.clone()).unwrap_or_else(|| "unknown".to_string());
+            
+            // Очищаем от префиксов типа "Release v1.2.3" -> "v1.2.3"
+            let clean_version = version.trim()
+                .replace("Release ", "")
+                .replace("release ", "")
+                .split_whitespace()
+                .next()
+                .unwrap_or(&version)
+                .to_string();
+            
+            Ok(clean_version)
+        } else {
+            Err(anyhow::anyhow!("No entries found in RSS feed"))
+        }
+    }
+
+    async fn update_binary(&self, binary_name: &str, config: &BinaryConfig, new_version: &str) -> Result<()> {
+        info!("Updating {} to version {}", binary_name, new_version);
+
+        // Формируем URL для скачивания
+        let download_url = config.download_url_template.replace("{}", new_version);
+
+        if binary_name == "ffmpeg" {
+            // FFmpeg requires special handling depending on platform
+            if cfg!(target_os = "windows") {
+                // For Windows, download the zip file and extract it
+                let temp_archive_path = config.binary_path.with_extension("zip");
+                download_file(&download_url, &temp_archive_path).await?;
+                
+                // Extract ffmpeg.exe and ffprobe.exe from the zip file
+                let _ffmpeg_dir = config.binary_path.parent().unwrap();
+                
+                #[cfg(target_os = "windows")]
+                {
+                    use std::path::PathBuf;
+                    let ffmpeg_dir_pathbuf = config.binary_path.parent().unwrap().to_path_buf();
+                    crate::yt_dlp_interface::extract_ffmpeg_windows(&temp_archive_path, &ffmpeg_dir_pathbuf).await?;
+                }
+
+                // Clean up the temp archive file
+                fs::remove_file(temp_archive_path).await.ok();
+            } else if cfg!(target_os = "macos") {
+                // For macOS, download the 7z archive and extract it
+                let temp_archive_path = config.binary_path.with_extension("7z");
+                download_file(&download_url, &temp_archive_path).await?;
+                
+                #[cfg(target_os = "macos")]
+                {
+                    use std::path::PathBuf;
+                    let ffmpeg_dir_pathbuf = config.binary_path.parent().unwrap().to_path_buf();
+                    crate::yt_dlp_interface::extract_ffmpeg_macos(&temp_archive_path, &ffmpeg_dir_pathbuf).await?;
+                }
+
+                // Clean up the temp archive file
+                fs::remove_file(temp_archive_path).await.ok();
+            } else if cfg!(target_os = "linux") {
+                // For Linux, download the tar.xz archive and extract it
+                // Using the johnvansickle.com static builds which are already extracted
+                let temp_archive_path = config.binary_path.with_extension("tar.xz");
+                download_file(&download_url, &temp_archive_path).await?;
+                
+                #[cfg(all(unix, not(target_os = "macos")))]
+                {
+                    use std::path::PathBuf;
+                    let ffmpeg_dir_pathbuf = config.binary_path.parent().unwrap().to_path_buf();
+                    crate::yt_dlp_interface::extract_ffmpeg_unix(&temp_archive_path, &ffmpeg_dir_pathbuf).await?;
+                }
+
+                // Clean up the temp archive file
+                fs::remove_file(temp_archive_path).await.ok();
+            }
+        } else {
+            // For yt-dlp, just download the executable
+            download_file(&download_url, &config.binary_path).await?;
+
+            // Устанавливаем права выполнения (Unix)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&config.binary_path).await?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&config.binary_path, perms).await?;
+            }
+        }
+
+        // Сохраняем новую версию
+        self.version_manager.save_version(binary_name, new_version).await?;
+        info!("Successfully updated {} to {}", binary_name, new_version);
+        Ok(())
+    }
+
+    async fn check_single_binary(&self, binary_name: &str, config: &BinaryConfig) -> Result<()> {
+        // Получаем текущую сохраненную версию
+        let current_version = self.version_manager.get_stored_version(binary_name).await.unwrap_or_default();
+
+        // Получаем последнюю версию из RSS
+        match self.get_latest_version_from_rss(&config.rss_url).await {
+            Ok(latest_version) => {
+                if latest_version != current_version && !latest_version.is_empty() {
+                    info!("New version available for {}: {} -> {}",
+                        binary_name, current_version, latest_version);
+
+                    // Обновляем бинарник
+                    if let Err(e) = self.update_binary(binary_name, config, &latest_version).await {
+                        error!("Failed to update {}: {}", binary_name, e);
+                    }
+                } else {
+                    info!("{} is up to date ({})", binary_name, current_version);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to check updates for {}: {}", binary_name, e);
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn check_for_updates(&self) -> Result<()> {
+        info!("Checking for binary updates...");
+        for (binary_name, config) in &self.binaries {
+            self.check_single_binary(binary_name, config).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn start_periodic_checks(&self) -> Result<()> {
+        info!("Starting periodic update checks every {} hours",
+            self.check_interval.as_secs() / 3600);
+        let mut interval = interval(self.check_interval);
+        
+        loop {
+            interval.tick().await;
+            if let Err(e) = self.check_for_updates().await {
+                error!("Update check failed: {}", e);
+            }
+        }
+    }
+}

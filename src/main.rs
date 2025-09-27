@@ -25,6 +25,7 @@ mod yt_dlp_interface;
 mod utils;
 mod telegram_bot_api_uploader;
 pub mod peers;
+mod auto_update;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -74,6 +75,24 @@ async fn main() -> Result<(), Error> {
         log::error!("ffprobe not found at {:?} after attempted download", ffprobe_path);
         return Err(anyhow::Error::msg("ffprobe not available"));
     }
+
+    // Настройка автообновления ПОСЛЕ ensure_binaries
+    let auto_updater = Arc::new(auto_update::AutoUpdater::new(libraries_dir.clone(), 2)); // Проверка каждые 2 часа
+    
+    // Первоначальная проверка обновлений
+    if let Err(e) = auto_updater.check_for_updates().await {
+        log::warn!("Initial update check failed: {}", e);
+    }
+
+    // Запускаем периодическую проверку в фоне
+    let updater_clone = Arc::clone(&auto_updater);
+    tokio::spawn(async move {
+        if let Err(e) = updater_clone.start_periodic_checks().await {
+            log::error!("Periodic update checker failed: {}", e);
+        }
+    });
+
+    log::info!("Auto-update functionality initialized");
 
     let db_path_env = env::var("DATABASE_PATH").unwrap_or_else(|_| {
         log::error!("DATABASE_PATH environment variable not set.");
