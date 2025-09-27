@@ -6,6 +6,12 @@ use crate::yt_dlp_interface::utils::is_executable_present;
 use crate::yt_dlp_interface::urls::{get_latest_yt_dlp_url, get_latest_ffmpeg_url};
 use crate::yt_dlp_interface::downloader::{download_file, extract_ffmpeg_windows};
 
+#[cfg(target_os = "macos")]
+use crate::yt_dlp_interface::downloader::extract_ffmpeg_macos;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use crate::yt_dlp_interface::downloader::extract_ffmpeg_unix;
+
 pub async fn ensure_binaries(libraries_dir: &Path, output_dir: &Path) -> Result<()> {
     fs::create_dir_all(libraries_dir).await?;
     fs::create_dir_all(output_dir).await?;
