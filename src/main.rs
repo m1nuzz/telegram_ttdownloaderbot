@@ -17,6 +17,7 @@ use teloxide::dptree;
 use robius_directories::ProjectDirs;
 
 mod commands;
+mod config;
 mod database;
 mod handlers;
 pub mod mtproto_uploader;
@@ -30,7 +31,10 @@ async fn main() -> Result<(), Error> {
     pretty_env_logger::init();
     log::info!("Starting TikTok downloader bot...");
 
-    dotenv::dotenv().ok();
+    if let Err(e) = crate::config::load_environment() {
+        log::error!("Failed to load environment: {}", e);
+        return Err(e.into());
+    }
 
     // Dynamic directory for libraries (yt-dlp and ffmpeg)
     let libraries_dir = std::env::current_dir()?.join("lib");
