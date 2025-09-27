@@ -67,21 +67,42 @@ pub async fn ensure_binaries(libraries_dir: &Path, output_dir: &Path) -> Result<
                 }
             }
         } else {
-            // For non-Windows (Linux/Android/MacOS), we might need a different approach
+            // For non-Windows (Linux/macOS), we download and extract the appropriate archive
             log::info!("Downloading FFmpeg and FFprobe for non-Windows platform...");
+            
             let ffmpeg_url = get_latest_ffmpeg_url();
+            if cfg!(target_os = "macos") {
+                // For macOS, download and extract 7z archive
+                let ffmpeg_archive_path = libraries_dir.join("ffmpeg.7z");
+                download_file(&ffmpeg_url, &ffmpeg_archive_path).await?;
+                
+                // Extract the archive
+                fs::create_dir_all(&ffmpeg_dir_path).await?;
+                
+                #[cfg(target_os = "macos")]
+                {
+                    extract_ffmpeg_macos(&ffmpeg_archive_path, &ffmpeg_dir_path).await?;
+                }
+            } else {
+                // For Linux, download and extract tar.xz archive
+                let ffmpeg_archive_path = libraries_dir.join("ffmpeg.tar.xz");
+                download_file(&ffmpeg_url, &ffmpeg_archive_path).await?;
+                
+                // Extract the archive
+                fs::create_dir_all(&ffmpeg_dir_path).await?;
+                
+                #[cfg(all(unix, not(target_os = "macos")))]
+                {
+                    extract_ffmpeg_unix(&ffmpeg_archive_path, &ffmpeg_dir_path).await?;
+                }
+            }
             
-            // Create directory for ffmpeg
-            fs::create_dir_all(ffmpeg_path.parent().unwrap()).await?;
-            
-            // For now, just download the tar.xz file and we'll assume it contains ffmpeg and ffprobe
-            // In practice, you might need to handle different extraction based on the archive type
-            download_file(&ffmpeg_url, &ffmpeg_path.with_extension("tar.xz")).await?;
-            
-            // For Termux on Android, ffmpeg/ffprobe might need to be installed differently
-            if cfg!(target_os = "linux") {
-                log::info!("For Linux/Android systems, you might need to install ffmpeg/ffprobe manually or use package manager");
-                log::info!("You can install ffmpeg with: apt install ffmpeg (in Termux) or equivalent package manager");
+            // On non-Windows, we still check for the extracted binaries
+            if !is_executable_present(&ffmpeg_path) {
+                log::error!("ffmpeg was not found in the expected location after extraction: {:?}", ffmpeg_path);
+            }
+            if !is_executable_present(&ffprobe_path) {
+                log::error!("ffprobe was not found in the expected location after extraction: {:?}", ffprobe_path);
             }
         }
     } else {
