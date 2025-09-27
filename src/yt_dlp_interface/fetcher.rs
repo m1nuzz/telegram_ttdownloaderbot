@@ -23,6 +23,9 @@ impl YoutubeFetcher {
     }
 
 pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quality: &str,progress_bar: &mut ProgressBar) -> Result<std::path::PathBuf> {
+        log::info!("Starting download for URL: {}", url);
+        let start_time = std::time::Instant::now();
+
         let output_template = if quality == "audio" {
             self.output_dir.join(format!("{}.%(ext)s", filename_stem))
         } else {
@@ -67,6 +70,8 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
         let mut stderr_reader = BufReader::new(stderr).lines();
 
         let mut last_percentage = 0.0f64;
+        let mut last_update_time = std::time::Instant::now();
+        const MIN_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500); // Minimum 500ms between updates
 
         loop {
             tokio::select! {
@@ -76,11 +81,15 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
                             log::trace!("yt-dlp stdout: {}", line);
                             if let Some((percentage, total_size)) = parse_progress_line(&line) {
                                 if percentage > last_percentage {
-                                    last_percentage = percentage;
-                                    // KEY CHANGE: scale 0-100% yt-dlp to 0-80% of overall progress
-                                    let overall_percentage = (percentage * 0.8) as u8; // 0-80%
-                                    let info = format!("⬇️ Downloading: {:.1}% ({:.1} MB)",percentage, total_size as f64 / 1_048_576.0);
-                                    progress_bar.update(overall_percentage, Some(&info)).await?;
+                                    let now = std::time::Instant::now();
+                                    if now.duration_since(last_update_time) >= MIN_UPDATE_INTERVAL {
+                                        last_percentage = percentage;
+                                        last_update_time = now;
+                                        // KEY CHANGE: scale 0-100% yt-dlp to 0-80% of overall progress
+                                        let overall_percentage = (percentage * 0.8) as u8; // 0-80%
+                                        let info = format!("⬇️ Downloading: {:.1}% ({:.1} MB)", percentage, total_size as f64 / 1_048_576.0);
+                                        progress_bar.update(overall_percentage, Some(&info)).await?;
+                                    }
                                 }
                             }
                         },
@@ -94,11 +103,15 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
                             log::trace!("yt-dlp stderr: {}", line);
                             if let Some((percentage, total_size)) = parse_progress_line(&line) {
                                 if percentage > last_percentage {
-                                    last_percentage = percentage;
-                                    let current_size = (total_size as f64 * (percentage / 100.0)) as u64;
-                                    let overall_percentage = ((current_size as f64 / total_size as f64 * 80.0).min(80.0).max(0.0)) as u8;
-                                    let info = format!("⬇️ Downloading: {:.1}% ({:.1} MB)", percentage, total_size as f64 / 1_048_576.0);
-                                    progress_bar.update(overall_percentage, Some(&info)).await?;
+                                    let now = std::time::Instant::now();
+                                    if now.duration_since(last_update_time) >= MIN_UPDATE_INTERVAL {
+                                        last_percentage = percentage;
+                                        last_update_time = now;
+                                        let current_size = (total_size as f64 * (percentage / 100.0)) as u64;
+                                        let overall_percentage = ((current_size as f64 / total_size as f64 * 80.0).min(80.0).max(0.0)) as u8;
+                                        let info = format!("⬇️ Downloading: {:.1}% ({:.1} MB)", percentage, total_size as f64 / 1_048_576.0);
+                                        progress_bar.update(overall_percentage, Some(&info)).await?;
+                                    }
                                 }
                             }
                         },
@@ -110,6 +123,7 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
         }
 
         let status = child.wait().await?;
+        let elapsed = start_time.elapsed();
 
         if status.success() {
             // After download completion, show 80%
@@ -121,11 +135,14 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
             for ext in [".mp4", ".mov", ".webm", ".mkv", ".flv", ".m4a", ".mp3", ".ogg", ".aac"] {
                 let alt_path = parent.join(format!("{}{}", stem.to_string_lossy(), ext));
                 if alt_path.exists() {
+                    log::info!("Download completed successfully in {:.2?} for: {}", elapsed, url);
                     return Ok(alt_path);
                 }
             }
+            log::error!("Downloaded file not found after successful yt-dlp execution for: {}", url);
             Err(anyhow::anyhow!("Downloaded file not found"))
         } else {
+            log::error!("yt-dlp failed after {:.2?} for: {}", elapsed, url);
             Err(anyhow::anyhow!("yt-dlp failed"))
         }
     }
@@ -163,12 +180,50 @@ fn remove_ansi_codes(text: &str) -> String {
 
 fn parse_size_string(s: &str) -> u64 {
     let s_clean = s.trim().to_lowercase();
-    let (number_str, multiplier) = if s_clean.ends_with("mib") || s_clean.ends_with("mb") {
-        (s_clean.trim_end_matches("mib").trim_end_matches("mb"), 1_024 * 1_024)
-    } else if s_clean.ends_with("gib") || s_clean.ends_with("gb") {
-        (s_clean.trim_end_matches("gib").trim_end_matches("gb"), 1_024 * 1_024 * 1_024)
+    let (number_str, multiplier) = if s_clean.ends_with("mib") {
+        (s_clean.trim_end_matches("mib"), 1_024 * 1_024) // Mebibyte (1024^2)
+    } else if s_clean.ends_with("mb") {
+        (s_clean.trim_end_matches("mb"), 1_000 * 1_000) // Megabyte (1000^2)
+    } else if s_clean.ends_with("gib") {
+        (s_clean.trim_end_matches("gib"), 1_024 * 1_024 * 1_024) // Gibibyte (1024^3)
+    } else if s_clean.ends_with("gb") {
+        (s_clean.trim_end_matches("gb"), 1_000 * 1_000 * 1_000) // Gigabyte (1000^3)
     } else {
-        (s_clean.trim_end_matches("b"), 1_048_576)
+        (s_clean.trim_end_matches("b"), 1) // For plain bytes
     };
     number_str.parse::<f64>().unwrap_or(1.0) as u64 * multiplier
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_size_string_mb() {
+        // MB is 1000^2, not 1024^2 (MiB)
+        assert_eq!(parse_size_string("10.0MB"), 10_000_000); // 10.0 * 1000^2
+        assert_eq!(parse_size_string("5.0MB"), 5_000_000);   // 5.0 * 1000^2
+    }
+
+    #[test]
+    fn test_parse_size_string_gb() {
+        assert_eq!(parse_size_string("1.0GB"), 1_000_000_000);   // 1.0 * 1000^3
+    }
+
+    #[test]
+    fn test_remove_ansi_codes() {
+        let input = "\x1B[31mRed text\x1B[0m";
+        let result = remove_ansi_codes(input);
+        assert_eq!(result, "Red text");
+    }
+
+    #[test]
+    fn test_parse_progress_line() {
+        let line = "[download]  50.0% of 10.00MiB";
+        let result = parse_progress_line(line);
+        assert!(result.is_some());
+        let (percentage, total_size) = result.unwrap();
+        assert_eq!(percentage, 50.0);
+        assert_eq!(total_size, 10_485_760); // 10 MiB
+    }
 }

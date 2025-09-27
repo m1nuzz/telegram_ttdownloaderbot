@@ -97,3 +97,94 @@ pub fn log_download(telegram_id: i64, video_url: &str) -> Result<()> {
     conn.execute("INSERT INTO downloads (user_telegram_id, video_url) VALUES (?1, ?2)", (telegram_id, video_url))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use std::env;
+
+    #[test]
+    fn test_database_initialization() {
+        // Create a temporary database for testing
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        unsafe {
+            env::set_var("DATABASE_PATH", db_path.to_str().unwrap());
+        }
+        
+        // Initialize the database
+        let result = init_database();
+        assert!(result.is_ok());
+        
+        // Verify that the tables were created
+        let conn = Connection::open(&db_path).unwrap();
+        let table_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'", 
+            [], 
+            |row| row.get(0)
+        ).unwrap();
+        
+        // There should be at least 5 tables: users, downloads, admins, channels, settings
+        assert!(table_count >= 5);
+    }
+    
+    #[test]
+    fn test_user_activity_update() {
+        // Create a temporary database for testing
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        unsafe {
+            env::set_var("DATABASE_PATH", db_path.to_str().unwrap());
+        }
+        
+        // Initialize the database
+        init_database().unwrap();
+        
+        // Test updating user activity
+        let user_id = 123456;
+        let result = update_user_activity(user_id);
+        assert!(result.is_ok());
+        
+        // Verify the user exists in the database - use the same environment variable
+        let db_path_from_env = env::var("DATABASE_PATH").unwrap();
+        let conn = Connection::open(&db_path_from_env).unwrap();
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE telegram_id = ?1",
+            [user_id],
+            |row| row.get(0)
+        ).unwrap();
+        
+        assert_eq!(count, 1);
+    }
+    
+    #[test]
+    fn test_download_logging() {
+        // Create a temporary database for testing
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        unsafe {
+            env::set_var("DATABASE_PATH", db_path.to_str().unwrap());
+        }
+        
+        // Initialize the database
+        init_database().unwrap();
+        
+        // Test logging a download
+        let user_id = 123456;
+        let video_url = "https://example.com/video.mp4";
+        let result = log_download(user_id, video_url);
+        assert!(result.is_ok());
+        
+        // Verify the download was logged - use the same environment variable
+        let db_path_from_env = env::var("DATABASE_PATH").unwrap();
+        let conn = Connection::open(&db_path_from_env).unwrap();
+        let count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE user_telegram_id = ?1 AND video_url = ?2",
+            (user_id, video_url),
+            |row| row.get(0)
+        ).unwrap();
+        
+        assert_eq!(count, 1);
+    }
+}

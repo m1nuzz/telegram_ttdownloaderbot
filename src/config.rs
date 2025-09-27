@@ -34,3 +34,17 @@ pub fn load_environment() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_dotenv_none_when_not_exists() {
+        // This test just ensures that the function doesn't crash when .env doesn't exist
+        // The actual path returned depends on the test environment
+        let result = find_dotenv();
+        // We just test that it doesn't panic
+        assert!(result.is_ok());
+    }
+}

@@ -30,6 +30,7 @@ pub mod peers;
 async fn main() -> Result<(), Error> {
     pretty_env_logger::init();
     log::info!("Starting TikTok downloader bot...");
+    let start_time = std::time::Instant::now();
 
     if let Err(e) = crate::config::load_environment() {
         log::error!("Failed to load environment: {}", e);
@@ -123,6 +124,9 @@ async fn main() -> Result<(), Error> {
             link_handler(bot, msg, fetcher, mtproto_uploader).await
         }))
         .branch(Update::filter_callback_query().endpoint(callback_handler));
+
+    log::info!("Bot initialization completed in {:.2?}", start_time.elapsed());
+    log::info!("Starting to dispatch updates...");
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![fetcher, mtproto_uploader])
