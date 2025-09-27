@@ -53,7 +53,7 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
                     }
                     Err(e) => {
                         log::error!("AddChannel DB error: {}", e);
-                        bot.send_message(msg.chat.id, "Failed to add channel.").await?;
+                        bot.send_message(msg.chat.id, "Failed to delete channel.").await?;
                     }
                 }
             } else {
@@ -98,11 +98,9 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
 
             match result {
                 Ok(channels) => {
-                    let mut response = String::from("Subscription channels:
-");
+                    let mut response = String::from("Subscription channels:\n");
                     for (id, name) in channels {
-                        response.push_str(&format!("- {} ({})
-", name, id));
+                        response.push_str(&format!("- {} ({})\n", name, id));
                     }
                     bot.send_message(msg.chat.id, response).await?;
                 }

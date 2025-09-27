@@ -1,5 +1,5 @@
 use teloxide::prelude::*;
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, Result as RusqliteResult, params};
 use std::env;
 use std::fs;
 use std::sync::Arc;
@@ -16,8 +16,43 @@ use crate::telegram_bot_api_uploader::{send_video_with_progress_botapi, send_aud
 
 const TELEGRAM_BOT_API_FILE_LIMIT: u64 = 48 * 1024 * 1024; // 48MB
 
+async fn get_subscription_required() -> Result<bool, anyhow::Error> {
+    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let result = tokio::task::spawn_blocking(move || -> RusqliteResult<bool> {
+        let conn = Connection::open(&db_path)?;
+        let value: String = conn.query_row(
+            "SELECT value FROM settings WHERE key = 'subscription_required'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value == "true")
+    }).await.map_err(|e| anyhow::anyhow!("Task join error: {}", e))?;
+    
+    Ok(result?)
+}
+
+async fn get_quality_preference(user_id: i64) -> Result<String, anyhow::Error> {
+    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let result = tokio::task::spawn_blocking(move || -> RusqliteResult<String> {
+        let conn = Connection::open(&db_path)?;
+        let value = conn.query_row(
+            "SELECT quality_preference FROM users WHERE telegram_id = ?1",
+            params![user_id],
+            |row| row.get(0),
+        );
+        match value {
+            Ok(v) => Ok(v),
+            Err(_) => Ok("best".to_string())
+        }
+    }).await.map_err(|e| anyhow::anyhow!("Task join error: {}", e))?;
+    
+    Ok(result?)
+}
+
 pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, mtproto_uploader: Arc<MTProtoUploader>) -> Result<(), anyhow::Error> {
-    if let Err(e) = update_user_activity(msg.chat.id.0) { log::error!("Failed to update user activity: {}", e); }
+    if let Err(e) = update_user_activity(msg.chat.id.0) {
+        log::error!("Failed to update user activity: {}", e);
+    }
 
     let text = match msg.text() {
         Some(text) => text,
@@ -32,14 +67,7 @@ pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, 
         let mut progress_bar = ProgressBar::new(bot.clone(), msg.chat.id);
         progress_bar.start("🎬 Starting...").await?;
 
-        let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-        let subscription_required: bool = {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.query_row("SELECT value FROM settings WHERE key = 'subscription_required'", [], |row| {
-                let value: String = row.get(0)?;
-                Ok(value == "true")
-            }).unwrap_or(true)
-        };
+        let subscription_required = get_subscription_required().await.unwrap_or(true);
 
         if subscription_required {
             let is_user_admin = is_admin(&msg).await;
@@ -49,14 +77,7 @@ pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, 
             }
         }
 
-        let quality_preference: String = {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.query_row(
-                "SELECT quality_preference FROM users WHERE telegram_id = ?1",
-                params![msg.chat.id.0],
-                |row| row.get(0),
-            ).unwrap_or("best".to_string())
-        };
+        let quality_preference = get_quality_preference(msg.chat.id.0).await.unwrap_or("best".to_string());
 
         let is_audio = quality_preference == "audio";
 
