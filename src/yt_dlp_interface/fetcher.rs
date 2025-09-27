@@ -47,17 +47,26 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
            .stdout(std::process::Stdio::piped())
            .stderr(std::process::Stdio::piped());
 
-        match quality {
-            "h264" => {
-                cmd.arg("--format").arg("best[vcodec=h264][ext=mp4]/best[ext=mp4]");
-            }
+        match quality.as_str() {
             "h265" => {
-                cmd.arg("--format").arg("best[acodec!=none][vcodec=h265][ext=mp4]/best[h265][ext=mp4]/best[vcodec=h265][ext=mp4]/best[ext=mp4]");
+                // Сортировка: предпочитаем высокое разрешение, битрейт и h265 (hevc)
+                cmd.arg("--format-sort").arg("res,br,vcodec:hevc");
+                // Формат: лучшее видео с h265 + лучшее аудио, fallback на лучший mp4
+                cmd.arg("--format").arg("bestvideo[vcodec~='^((hevc|h265|h.265))'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
+            }
+            "h264" => {
+                // Сортировка: предпочитаем высокое разрешение, битрейт и h264 (avc)
+                cmd.arg("--format-sort").arg("res,br,vcodec:avc");
+                // Формат: лучшее видео с h264 + лучшее аудио, fallback на лучший mp4
+                cmd.arg("--format").arg("bestvideo[vcodec~='^((avc|h264|h.264))'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
             }
             "audio" => {
+                // Для аудио оставляем как есть, или оптимизируйте аналогично
                 cmd.arg("--extract-audio").arg("--audio-format").arg("mp3");
+                cmd.arg("--format").arg("bestaudio[ext=m4a]/bestaudio");
             }
             _ => {
+                // Fallback для других качеств
                 cmd.arg("--format").arg("best[ext=mp4]");
             }
         }
