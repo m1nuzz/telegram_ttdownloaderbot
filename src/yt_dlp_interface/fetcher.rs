@@ -49,16 +49,16 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
 
         match quality {
             "h264" => {
-                cmd.arg("--format").arg("bestvideo[vcodec=h264]+bestaudio/best[vcodec=h264]");
+                cmd.arg("--format").arg("best[vcodec=h264][ext=mp4]/best[ext=mp4]");
             }
             "h265" => {
-                cmd.arg("--format").arg("bestvideo[vcodec=h265]+bestaudio/best[vcodec=h265]");
+                cmd.arg("--format").arg("best[acodec!=none][vcodec=h265][ext=mp4]/best[h265][ext=mp4]/best[vcodec=h265][ext=mp4]/best[ext=mp4]");
             }
             "audio" => {
                 cmd.arg("--extract-audio").arg("--audio-format").arg("mp3");
             }
             _ => {
-                cmd.arg("--format").arg("best");
+                cmd.arg("--format").arg("best[ext=mp4]");
             }
         }
 
