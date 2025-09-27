@@ -59,20 +59,20 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            powershell -Command "Compress-Archive -Path dist\\* -DestinationPath dist\\${{ matrix.archive }}"
+            powershell -Command "Compress-Archive -Path dist\\* -DestinationPath ${{ matrix.archive }}"
           else
-            tar -C dist -czf dist/${{ matrix.archive }} .
+            tar -C dist -czf ${{ matrix.archive }} .
           fi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: dist/${{ matrix.archive }}
+          path: ${{ matrix.archive }}
       - name: Publish GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.archive }}
+          files: ${{ matrix.archive }}
           draft: false
           prerelease: false
           generate_release_notes: true
