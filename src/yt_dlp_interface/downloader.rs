@@ -5,14 +5,14 @@ use zip::ZipArchive;
 use anyhow::Result;
 use std::io::Read;
 
-#[cfg(unix)]
-use tar::Archive;
-
-#[cfg(unix)]
-use xz2::read::XzDecoder;
-
 #[cfg(target_os = "macos")]
 use sevenz_rust::decompress_file as decompress_7z;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use tar::Archive;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use xz2::read::XzDecoder;
 
 pub async fn download_file(url: &str, path: &PathBuf) -> Result<()> {
     log::info!("Downloading from {} to {:?}", url, path);
@@ -91,71 +91,73 @@ pub async fn extract_ffmpeg_windows(zip_path: &PathBuf, extract_to: &PathBuf) ->
 
 #[cfg(target_os = "macos")]
 pub async fn extract_ffmpeg_macos(archive_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
-    use std::path::Path;
     use tokio::fs;
     
     // Create the extraction directory
     fs::create_dir_all(extract_to).await?;
     
-    // Extract the 7z archive
-    let archive_result = decompress_7z(
-        archive_path.as_path(),
-        extract_to.as_path(),
-        |entry, _size| {
-            if entry.name.ends_with("ffmpeg") || entry.name.ends_with("ffprobe") {
-                Ok(true) // We want to extract this file
-            } else {
-                Ok(false) // Skip other files
-            }
-        }
-    );
+    // Extract the 7z archive - decompress_7z extracts all files
+    let archive_result = decompress_7z(archive_path.as_path(), extract_to.as_path());
     
     if archive_result.is_err() {
         return Err(anyhow::anyhow!("Failed to extract 7z archive: {:?}", archive_result.err()));
     }
     
-    // Find the extracted binaries and rename if necessary
-    // Look for the extracted files in the extraction directory
+    // Find the extracted binaries and ensure they are named correctly
+    // Look for the extracted files in the extraction directory and subdirectories
     let mut ffmpeg_found = false;
     let mut ffprobe_found = false;
     
-    if let Ok(entries) = std::fs::read_dir(extract_to) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let file_name = entry.file_name();
-                
-                if file_name.to_string_lossy().to_lowercase().contains("ffmpeg") 
-                    && !file_name.to_string_lossy().to_lowercase().contains("ffprobe") {
+    // Search recursively for ffmpeg and ffprobe binaries
+    let mut entries_to_check = vec![extract_to.clone()];
+    let ffmpeg_output_path = extract_to.join("ffmpeg");
+    let ffprobe_output_path = extract_to.join("ffprobe");
+
+    while let Some(dir_to_check) = entries_to_check.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir_to_check) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let entry_path = entry.path();
                     
-                    let ffmpeg_path = extract_to.join("ffmpeg");
-                    if ffmpeg_path != entry.path() {
-                        std::fs::rename(entry.path(), &ffmpeg_path)?;
+                    if entry_path.is_dir() {
+                        entries_to_check.push(entry_path);
+                    } else if entry_path.is_file() {
+                        let file_name = entry.file_name();
+                        
+                        if file_name.to_string_lossy().to_lowercase().contains("ffmpeg") 
+                            && !file_name.to_string_lossy().to_lowercase().contains("ffprobe") {
+                            
+                            // Found ffmpeg, copy to expected location if needed
+                            if !ffmpeg_output_path.exists() || ffmpeg_output_path != entry_path {
+                                std::fs::copy(&entry_path, &ffmpeg_output_path)?;
+                            }
+                            
+                            // Set executable permissions
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = std::fs::metadata(&ffmpeg_output_path)?.permissions();
+                            perms.set_mode(0o755);
+                            
+                            log::info!("Extracted ffmpeg to {:?}", ffmpeg_output_path);
+                            ffmpeg_found = true;
+                        } else if file_name.to_string_lossy().to_lowercase().contains("ffprobe") {
+                            // Found ffprobe, copy to expected location if needed
+                            if !ffprobe_output_path.exists() || ffprobe_output_path != entry_path {
+                                std::fs::copy(&entry_path, &ffprobe_output_path)?;
+                            }
+                            
+                            // Set executable permissions
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = std::fs::metadata(&ffprobe_output_path)?.permissions();
+                            perms.set_mode(0o755);
+                            
+                            log::info!("Extracted ffprobe to {:?}", ffprobe_output_path);
+                            ffprobe_found = true;
+                        }
+                        
+                        if ffmpeg_found && ffprobe_found {
+                            break;
+                        }
                     }
-                    
-                    // Set executable permissions
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&ffmpeg_path)?.permissions();
-                    perms.set_mode(0o755);
-                    
-                    log::info!("Extracted ffmpeg to {:?}", ffmpeg_path);
-                    ffmpeg_found = true;
-                } else if file_name.to_string_lossy().to_lowercase().contains("ffprobe") {
-                    let ffprobe_path = extract_to.join("ffprobe");
-                    if ffprobe_path != entry.path() {
-                        std::fs::rename(entry.path(), &ffprobe_path)?;
-                    }
-                    
-                    // Set executable permissions
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&ffprobe_path)?.permissions();
-                    perms.set_mode(0o755);
-                    
-                    log::info!("Extracted ffprobe to {:?}", ffprobe_path);
-                    ffprobe_found = true;
-                }
-                
-                if ffmpeg_found && ffprobe_found {
-                    break;
                 }
             }
         }
@@ -173,7 +175,6 @@ pub async fn extract_ffmpeg_macos(archive_path: &PathBuf, extract_to: &PathBuf) 
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub async fn extract_ffmpeg_unix(archive_path: &PathBuf, extract_to: &PathBuf) -> Result<()> {
-    use std::path::Path;
     use tokio::fs;
     use std::fs::File;
 
