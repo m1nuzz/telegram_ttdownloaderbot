@@ -52,13 +52,14 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
                 // Сортировка: предпочитаем высокое разрешение, битрейт и h265 (hevc)
                 cmd.arg("--format-sort").arg("res,br,vcodec:hevc");
                 // Формат: лучшее видео с h265 + лучшее аудио, fallback на лучший mp4
-                cmd.arg("--format").arg("bestvideo[vcodec~='^((hevc|h265|h.265))'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
+                // Учитываем также bytevc1, используемый TikTok для H.265
+                cmd.arg("--format").arg("bestvideo[vcodec~='hevc|bytevc1'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
             }
             "h264" => {
                 // Сортировка: предпочитаем высокое разрешение, битрейт и h264 (avc)
                 cmd.arg("--format-sort").arg("res,br,vcodec:avc");
                 // Формат: лучшее видео с h264 + лучшее аудио, fallback на лучший mp4
-                cmd.arg("--format").arg("bestvideo[vcodec~='^((avc|h264|h.264))'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
+                cmd.arg("--format").arg("bestvideo[vcodec~='avc1|h264'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
             }
             "audio" => {
                 // Для аудио оставляем как есть, или оптимизируйте аналогично
