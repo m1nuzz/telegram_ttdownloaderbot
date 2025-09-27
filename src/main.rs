@@ -29,7 +29,46 @@ mod auto_update;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    pretty_env_logger::init();
+    // Initialize both console and file logging
+    // Set up custom logger to capture errors to a file
+    use std::sync::Mutex;
+    use std::fs::OpenOptions;
+    use log::LevelFilter;
+
+    // Create a shared file handle for error logging
+    let error_log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open("bot_errors.log")?;
+    
+    let error_log_file = std::sync::Arc::new(Mutex::new(error_log_file));
+    
+    // Set up logging to output to both console and file for errors
+    let mut builder = pretty_env_logger::formatted_builder();
+    builder
+        .format(move |buf, record| {
+            use std::io::Write;
+            let output = format!(
+                "{} [{}] {}: {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.target(),
+                record.args()
+            );
+            
+            // For error messages, also write to the error log file
+            if record.level() == log::Level::Error {
+                if let Ok(mut file) = error_log_file.try_lock() {
+                    let _ = writeln!(file, "{}", &output);
+                }
+            }
+            
+            writeln!(buf, "{}", &output)
+        })
+        .filter(None, LevelFilter::Info)
+        .init();
+    
     log::info!("Starting TikTok downloader bot...");
     let start_time = std::time::Instant::now();
 

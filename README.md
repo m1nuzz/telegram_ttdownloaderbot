@@ -22,30 +22,6 @@ The bot features an RSS-based auto-update system that:
 - Maintains version tracking to avoid unnecessary updates
 - Handles platform-specific binary extraction
 
-## Installation
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/m1nuzz/telegram_ttdownloaderbot.git
-   cd telegram_ttdownloaderbot
-   ```
-
-2. Create a `.env` file based on `.env.example` and add your Telegram bot token:
-   ```env
-   TELOXIDE_TOKEN=your_telegram_bot_token_here
-   DATABASE_PATH=path_to_database_file
-   ```
-
-3. Build the project:
-   ```bash
-   cargo build --release
-   ```
-
-4. Run the bot:
-   ```bash
-   cargo run
-   ```
-
 ## Dependencies
 
 - Rust 1.89.0 or later

@@ -29,11 +29,11 @@ impl AutoUpdater {
             rss_url: "https://github.com/yt-dlp/yt-dlp/releases.atom".to_string(),
             binary_path: libraries_dir.join(if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" }),
             download_url_template: if cfg!(target_os = "windows") {
-                "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp.exe".to_string()
+                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe".to_string()
             } else if cfg!(target_os = "linux") {
-                "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp_linux".to_string()
+                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux".to_string()
             } else {
-                "https://github.com/yt-dlp/yt-dlp/releases/download/{}/yt-dlp_macos".to_string()
+                "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos".to_string()
             },
         });
 
@@ -43,7 +43,7 @@ impl AutoUpdater {
             rss_url: "https://github.com/BtbN/FFmpeg-Builds/releases.atom".to_string(),
             binary_path: ffmpeg_dir.join(if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" }),
             download_url_template: if cfg!(target_os = "windows") {
-                "https://github.com/BtbN/FFmpeg-Builds/releases/download/{}/ffmpeg-master-latest-win64-gpl.zip".to_string()
+                "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip".to_string()
             } else {
                 "https://johnvansickle.com/ffmpeg/releases/ffmpeg-git-amd64-static.tar.xz".to_string()
             },
@@ -84,8 +84,65 @@ impl AutoUpdater {
     async fn update_binary(&self, binary_name: &str, config: &BinaryConfig, new_version: &str) -> Result<()> {
         info!("Updating {} to version {}", binary_name, new_version);
 
-        // Формируем URL для скачивания
-        let download_url = config.download_url_template.replace("{}", new_version);
+        // Form the download URL based on the binary type
+        let download_url = if binary_name == "yt-dlp" {
+            // For yt-dlp, use the /latest/download/ path which works without version substitution
+            config.download_url_template.clone()
+        } else {
+            // For FFmpeg, parse the RSS feed to find the correct download URL
+            // First, get the latest release info from RSS
+            let response = reqwest::get(&config.rss_url).await?;
+            let content = response.text().await?;
+            let feed = parser::parse(content.as_bytes())?;
+            
+            if let Some(entry) = feed.entries.first() {
+                // For FFmpeg, we need to find the correct asset link from the release
+                // GitHub RSS feeds contain links to assets in the content or links sections
+                // Try to extract the correct download link for the platform
+                
+                if binary_name == "ffmpeg" {
+                    // Extract the correct asset URL for the platform
+                    // The link might be in the content or in the links array
+                    if cfg!(target_os = "windows") {
+                        // For Windows, we need to extract the correct asset URL
+                        // GitHub releases might have multiple assets, so we need to find the correct one
+                        // Check the entry's links for direct asset download links
+                        let mut found_asset_url = None;
+                        
+                        for link in &entry.links {
+                            if link.href.contains("github.com/BtbN/FFmpeg-Builds/releases/download/") && 
+                               link.href.contains("win64-gpl") && 
+                               link.href.ends_with(".zip") {
+                                // Found a Windows GPL zip asset
+                                found_asset_url = Some(link.href.clone());
+                                break;
+                            }
+                        }
+                        
+                        if let Some(asset_url) = found_asset_url {
+                            asset_url
+                        } else {
+                            // Fallback if no direct link found in RSS - try with common pattern
+                            // The latest naming seems to follow the pattern like ffmpeg-n7.1-latest-win64-gpl-7.1.zip
+                            // Since we can't know the exact version from RSS, try with latest
+                            "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-n7.1-latest-win64-gpl-7.1.zip".to_string()
+                        }
+                    } else if cfg!(target_os = "linux") {
+                        // For Linux, use the johnvansickle.com static build
+                        config.download_url_template.clone()
+                    } else {
+                        // For macOS, use template
+                        config.download_url_template.replace("{}", &new_version)
+                    }
+                } else {
+                    // For other binaries, use template with version replacement
+                    config.download_url_template.replace("{}", &new_version)
+                }
+            } else {
+                // Fallback to template if no RSS entries
+                config.download_url_template.replace("{}", &new_version)
+            }
+        };
 
         if binary_name == "ffmpeg" {
             // FFmpeg requires special handling depending on platform
@@ -99,7 +156,6 @@ impl AutoUpdater {
                 
                 #[cfg(target_os = "windows")]
                 {
-                    use std::path::PathBuf;
                     let ffmpeg_dir_pathbuf = config.binary_path.parent().unwrap().to_path_buf();
                     crate::yt_dlp_interface::extract_ffmpeg_windows(&temp_archive_path, &ffmpeg_dir_pathbuf).await?;
                 }
@@ -113,7 +169,6 @@ impl AutoUpdater {
                 
                 #[cfg(target_os = "macos")]
                 {
-                    use std::path::PathBuf;
                     let ffmpeg_dir_pathbuf = config.binary_path.parent().unwrap().to_path_buf();
                     crate::yt_dlp_interface::extract_ffmpeg_macos(&temp_archive_path, &ffmpeg_dir_pathbuf).await?;
                 }
@@ -128,7 +183,6 @@ impl AutoUpdater {
                 
                 #[cfg(all(unix, not(target_os = "macos")))]
                 {
-                    use std::path::PathBuf;
                     let ffmpeg_dir_pathbuf = config.binary_path.parent().unwrap().to_path_buf();
                     crate::yt_dlp_interface::extract_ffmpeg_unix(&temp_archive_path, &ffmpeg_dir_pathbuf).await?;
                 }
