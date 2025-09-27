@@ -56,33 +56,22 @@ impl AutoUpdater {
         }
     }
 
-    // Парсинг RSS фида для получения последней версии
-    async fn get_latest_version_from_rss(&self, rss_url: &str) -> Result<String> {
+    // Get the latest release ID from the RSS feed
+    async fn get_latest_release_id_from_rss(&self, rss_url: &str) -> Result<String> {
         let response = reqwest::get(rss_url).await?;
         let content = response.text().await?;
         let feed = parser::parse(content.as_bytes())?;
 
         if let Some(entry) = feed.entries.first() {
-            // Извлекаем версию из title или link
-            let version = entry.title.as_ref().map(|t| t.content.clone()).unwrap_or_else(|| "unknown".to_string());
-            
-            // Очищаем от префиксов типа "Release v1.2.3" -> "v1.2.3"
-            let clean_version = version.trim()
-                .replace("Release ", "")
-                .replace("release ", "")
-                .split_whitespace()
-                .next()
-                .unwrap_or(&version)
-                .to_string();
-            
-            Ok(clean_version)
+            // The entry ID is a stable, unique identifier for the release (e.g., a URL)
+            Ok(entry.id.clone())
         } else {
             Err(anyhow::anyhow!("No entries found in RSS feed"))
         }
     }
 
-    async fn update_binary(&self, binary_name: &str, config: &BinaryConfig, new_version: &str) -> Result<()> {
-        info!("Updating {} to version {}", binary_name, new_version);
+    async fn update_binary(&self, binary_name: &str, config: &BinaryConfig, new_release_id: &str) -> Result<()> {
+        info!("Updating {} to new release: {}", binary_name, new_release_id);
 
         // Form the download URL based on the binary type
         let download_url = if binary_name == "yt-dlp" {
@@ -132,15 +121,15 @@ impl AutoUpdater {
                         config.download_url_template.clone()
                     } else {
                         // For macOS, use template
-                        config.download_url_template.replace("{}", &new_version)
+                        config.download_url_template.replace("{}", &new_release_id)
                     }
                 } else {
                     // For other binaries, use template with version replacement
-                    config.download_url_template.replace("{}", &new_version)
+                    config.download_url_template.replace("{}", &new_release_id)
                 }
             } else {
                 // Fallback to template if no RSS entries
-                config.download_url_template.replace("{}", &new_version)
+                config.download_url_template.replace("{}", &new_release_id)
             }
         };
 
@@ -205,28 +194,28 @@ impl AutoUpdater {
         }
 
         // Сохраняем новую версию
-        self.version_manager.save_version(binary_name, new_version).await?;
-        info!("Successfully updated {} to {}", binary_name, new_version);
+        self.version_manager.save_version(binary_name, new_release_id).await?;
+        info!("Successfully updated {} to new release: {}", binary_name, new_release_id);
         Ok(())
     }
 
     async fn check_single_binary(&self, binary_name: &str, config: &BinaryConfig) -> Result<()> {
-        // Получаем текущую сохраненную версию
-        let current_version = self.version_manager.get_stored_version(binary_name).await.unwrap_or_default();
+        // Get the currently stored release ID
+        let current_id = self.version_manager.get_stored_version(binary_name).await.unwrap_or_default();
 
-        // Получаем последнюю версию из RSS
-        match self.get_latest_version_from_rss(&config.rss_url).await {
-            Ok(latest_version) => {
-                if latest_version != current_version && !latest_version.is_empty() {
-                    info!("New version available for {}: {} -> {}",
-                        binary_name, current_version, latest_version);
+        // Get the latest release ID from the RSS feed
+        match self.get_latest_release_id_from_rss(&config.rss_url).await {
+            Ok(latest_id) => {
+                if latest_id != current_id && !latest_id.is_empty() {
+                    info!("New release found for {}: ID {}",
+                        binary_name, latest_id);
 
-                    // Обновляем бинарник
-                    if let Err(e) = self.update_binary(binary_name, config, &latest_version).await {
+                    // Update the binary
+                    if let Err(e) = self.update_binary(binary_name, config, &latest_id).await {
                         error!("Failed to update {}: {}", binary_name, e);
                     }
                 } else {
-                    info!("{} is up to date ({})", binary_name, current_version);
+                    info!("{} is up to date (Release ID: {})", binary_name, current_id);
                 }
             }
             Err(e) => {
