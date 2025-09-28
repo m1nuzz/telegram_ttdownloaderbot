@@ -116,8 +116,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use std::env;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_database_initialization() {
         // Create a temporary database for testing
         let temp_dir = TempDir::new().unwrap();
@@ -147,6 +149,7 @@ mod tests {
     }
     
     #[test]
+    #[serial]
     fn test_user_activity_update() {
         // Create a temporary database for testing
         let temp_dir = TempDir::new().unwrap();
@@ -179,6 +182,7 @@ mod tests {
     }
     
     #[test]
+    #[serial]
     fn test_download_logging() {
         // Create a temporary database for testing
         let temp_dir = TempDir::new().unwrap();
