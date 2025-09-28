@@ -104,12 +104,14 @@ async fn main() -> Result<(), Error> {
         return Err(e.into());
     }
 
+    let exe_dir = std::env::current_exe()?.parent().ok_or_else(|| anyhow::anyhow!("Failed to get parent directory of executable"))?.to_path_buf();
+    log::info!("Executable directory: {:?}", exe_dir);
+
     // Dynamic directory for libraries (yt-dlp and ffmpeg)
-    let libraries_dir = std::env::current_dir()?.join("lib");
+    let libraries_dir = exe_dir.join("lib");
 
     // Dynamic directory for output
-    let output_dir = std::env::current_dir()? // Consider making this configurable or user-specific
-        .join("downloads");
+    let output_dir = exe_dir.join("downloads");
 
     // Ensure required binaries are present before starting the async runtime
     if let Err(e) = ensure_binaries(&libraries_dir, &output_dir).await {
