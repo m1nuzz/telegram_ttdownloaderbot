@@ -5,10 +5,11 @@ use std::env;
 use tokio::fs;
 use std::sync::Arc;
 
+use crate::database::DatabasePool;
 use crate::handlers::admin::is_admin;
 use crate::handlers::command::{get_main_reply_keyboard, get_format_reply_keyboard, get_subscription_reply_keyboard};
 
-pub async fn callback_handler(bot: Bot, q: CallbackQuery) -> Result<(), anyhow::Error> {
+pub async fn callback_handler(bot: Bot, q: CallbackQuery, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
     if let Some(data) = q.data {
         log::info!("Received callback query with data: {}", data);
 
@@ -16,13 +17,26 @@ pub async fn callback_handler(bot: Bot, q: CallbackQuery) -> Result<(), anyhow::
             if let Some(message) = maybe_message.regular_message() {
                 if data.starts_with("set_quality_") {
                     let quality = data.split_at("set_quality_".len()).1;
-                    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-                    let conn = Connection::open(db_path).unwrap();
-                    conn.execute(
-                        "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
-                        params![quality, message.chat.id.0],
-                    ).unwrap();
-                    bot.answer_callback_query(q.id).text(&format!("Quality set to {}", quality)).await?;
+                    let user_id = message.chat.id.0;
+                    let quality_string = quality.to_string(); // Make a string copy
+                    
+                    // Use database pool for quality preference update
+                    let result = db_pool.execute_with_timeout(move |conn| {
+                        conn.execute(
+                            "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
+                            params![quality_string, user_id],
+                        )
+                    }).await;
+                    
+                    match result {
+                        Ok(_) => {
+                            bot.answer_callback_query(q.id).text(&format!("Quality set to {}", quality)).await?;
+                        },
+                        Err(e) => {
+                            log::error!("Failed to update quality preference: {}", e);
+                            bot.answer_callback_query(q.id).text("Failed to update quality preference").await?;
+                        }
+                    }
                 } else {
                     match data.as_str() {
                         "settings" => {
@@ -83,27 +97,39 @@ pub async fn callback_handler(bot: Bot, q: CallbackQuery) -> Result<(), anyhow::
                         bot.answer_callback_query(q.id).text("Action not available.").await?;
                     }
                     "enable_subscription" => {
-                        let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-                        let db_path_cloned = Arc::new(db_path.clone());
-                        let _result: Result<bool, rusqlite::Error> = tokio::task::spawn_blocking(move || {
-                            let conn = Connection::open(&*db_path_cloned)?;
+                        // Using database pool with timeout
+                        let result = db_pool.execute_with_timeout(|conn| {
                             conn.execute(
                                 "UPDATE settings SET value = ?1 WHERE key = 'subscription_required'",
                                 params!["true"],
-                            )?;
-                            Ok(true)
-                        }).await.unwrap();
-                        update_env_subscription_setting(true).await?;
-                        bot.answer_callback_query(q.id).text("Mandatory subscription enabled.").await?;
+                            )
+                        }).await;
+                        
+                        match result {
+                            Ok(_) => {
+                                // Update the environment variable asynchronously
+                                if let Err(e) = update_env_subscription_setting(true).await {
+                                    log::error!("Failed to update .env file: {}", e);
+                                }
+                                bot.answer_callback_query(q.id).text("Mandatory subscription enabled.").await?;
+                            },
+                            Err(e) => {
+                                log::error!("Database operation failed: {}", e);
+                                bot.answer_callback_query(q.id).text("Operation failed - please try again.").await?;
+                            }
+                        }
+                        
                         // Refresh the menu
-                        let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-                        let subscription_required: bool = {
-                            let conn = Connection::open(&db_path).unwrap();
-                            conn.query_row("SELECT value FROM settings WHERE key = 'subscription_required'", [], |row| {
-                                let value: String = row.get(0)?;
-                                Ok(value == "true")
-                            }).unwrap_or(true)
-                        };
+                        let subscription_required = db_pool.execute_with_timeout(|conn| {
+                            match conn.query_row(
+                                "SELECT value FROM settings WHERE key = 'subscription_required'",
+                                [],
+                                |row| Ok(row.get::<_, String>(0)? == "true")
+                            ) {
+                                Ok(value) => Ok(value),
+                                Err(_) => Ok(true) // Default to true
+                            }
+                        }).await.unwrap_or(true);
 
                         let toggle_button = if subscription_required {
                             InlineKeyboardButton::callback("Disable Subscription", "disable_subscription")
@@ -118,27 +144,39 @@ pub async fn callback_handler(bot: Bot, q: CallbackQuery) -> Result<(), anyhow::
                         bot.edit_message_reply_markup(message.chat.id, message.id).reply_markup(keyboard).await?;
                     }
                     "disable_subscription" => {
-                        let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-                        let db_path_cloned = Arc::new(db_path.clone());
-                        let _result: Result<bool, rusqlite::Error> = tokio::task::spawn_blocking(move || {
-                            let conn = Connection::open(&*db_path_cloned)?;
+                        // Using database pool with timeout
+                        let result = db_pool.execute_with_timeout(|conn| {
                             conn.execute(
                                 "UPDATE settings SET value = ?1 WHERE key = 'subscription_required'",
                                 params!["false"],
-                            )?;
-                            Ok(false)
-                        }).await.unwrap();
-                        update_env_subscription_setting(false).await?;
-                        bot.answer_callback_query(q.id).text("Mandatory subscription disabled.").await?;
+                            )
+                        }).await;
+                        
+                        match result {
+                            Ok(_) => {
+                                // Update the environment variable asynchronously
+                                if let Err(e) = update_env_subscription_setting(false).await {
+                                    log::error!("Failed to update .env file: {}", e);
+                                }
+                                bot.answer_callback_query(q.id).text("Mandatory subscription disabled.").await?;
+                            },
+                            Err(e) => {
+                                log::error!("Database operation failed: {}", e);
+                                bot.answer_callback_query(q.id).text("Operation failed - please try again.").await?;
+                            }
+                        }
+                        
                         // Refresh the menu
-                        let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-                        let subscription_required: bool = {
-                            let conn = Connection::open(&db_path).unwrap();
-                            conn.query_row("SELECT value FROM settings WHERE key = 'subscription_required'", [], |row| {
-                                let value: String = row.get(0)?;
-                                Ok(value == "true")
-                            }).unwrap_or(true)
-                        };
+                        let subscription_required = db_pool.execute_with_timeout(|conn| {
+                            match conn.query_row(
+                                "SELECT value FROM settings WHERE key = 'subscription_required'",
+                                [],
+                                |row| Ok(row.get::<_, String>(0)? == "true")
+                            ) {
+                                Ok(value) => Ok(value),
+                                Err(_) => Ok(true) // Default to true
+                            }
+                        }).await.unwrap_or(true);
 
                         let toggle_button = if subscription_required {
                             InlineKeyboardButton::callback("Disable Subscription", "disable_subscription")
@@ -153,14 +191,16 @@ pub async fn callback_handler(bot: Bot, q: CallbackQuery) -> Result<(), anyhow::
                         bot.edit_message_reply_markup(message.chat.id, message.id).reply_markup(keyboard).await?;
                     }
                     "subscription_menu" => {
-                        let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-                        let subscription_required: bool = {
-                            let conn = Connection::open(&db_path).unwrap();
-                            conn.query_row("SELECT value FROM settings WHERE key = 'subscription_required'", [], |row| {
-                                let value: String = row.get(0)?;
-                                Ok(value == "true")
-                            }).unwrap_or(true)
-                        };
+                        let subscription_required = db_pool.execute_with_timeout(|conn| {
+                            match conn.query_row(
+                                "SELECT value FROM settings WHERE key = 'subscription_required'",
+                                [],
+                                |row| Ok(row.get::<_, String>(0)? == "true")
+                            ) {
+                                Ok(value) => Ok(value),
+                                Err(_) => Ok(true) // Default to true
+                            }
+                        }).await.unwrap_or(true);
 
                         let toggle_button = if subscription_required {
                             InlineKeyboardButton::callback("Disable Subscription", "disable_subscription")

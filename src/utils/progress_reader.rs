@@ -28,7 +28,7 @@ where
     F: Fn(u64, u64) + Send + Sync + 'static + Unpin,
 {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut(); // Use self.get_mut() as Self is Unpin
+        let this = self.get_mut();
         let before = buf.filled().len();
         match Pin::new(&mut this.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
@@ -36,6 +36,7 @@ where
                 let delta = (now - before) as u64;
                 if delta > 0 {
                     this.uploaded += delta;
+                    // Call the progress callback directly - it should be as fast as possible
                     (this.on_progress)(this.uploaded, this.total);
                 }
                 Poll::Ready(Ok(()))

@@ -1,5 +1,5 @@
 use teloxide::{prelude::*, types::{MessageId, ChatId}, requests::Requester};
-use tokio::time::{Duration, Instant};
+use tokio::time::{timeout, Duration, Instant};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use anyhow::Result;
@@ -46,13 +46,38 @@ impl ProgressBar {
     }
 
     async fn update_internal(&mut self, percentage: u8, extra_info: Option<&str>) -> Result<(), anyhow::Error> {
+        // Check rate limiting
         let now = Instant::now();
         let mut last_update = self.last_update.lock().await;
-        if self.message_id.is_none() || (now.duration_since(*last_update) >= self.min_update_interval) || percentage >= 100 {
-            *last_update = now;
-            if let Some(message_id) = self.message_id {
-                let progress_text = self.create_progress_bar(percentage, extra_info);
-                let _ = self.bot.edit_message_text(self.chat_id, message_id, progress_text).await;
+        let should_update = self.message_id.is_none() ||
+            now.duration_since(*last_update) >= self.min_update_interval ||
+            percentage == 100;
+        
+        if !should_update {
+            return Ok(());
+        }
+        
+        *last_update = now;
+        
+        if let Some(message_id) = self.message_id {
+            let progress_text = self.create_progress_bar(percentage, extra_info);
+            
+            // Timeout for update with graceful handling
+            let update_result = timeout(
+                Duration::from_secs(5),
+                self.bot.edit_message_text(self.chat_id, message_id, progress_text)
+            ).await;
+            
+            match update_result {
+                Ok(Ok(_)) => {}, // Success
+                Ok(Err(e)) => {
+                    log::debug!("Progress bar update failed: {}", e);
+                    // Don't break execution due to UI update error
+                },
+                Err(_) => {
+                    log::debug!("Progress bar update timed out");
+                    // Also not critical
+                }
             }
         }
         Ok(())

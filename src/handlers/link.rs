@@ -1,55 +1,47 @@
 use teloxide::prelude::*;
-use rusqlite::{Connection, Result as RusqliteResult, params};
 
 use std::fs;
 use std::sync::Arc;
 use uuid::Uuid;
-use tokio::time::Duration;
+use tokio::time::{Duration, timeout};
+use std::path::PathBuf;
 
-use crate::database::{update_user_activity, log_download};
+use crate::database::{update_user_activity, log_download, DatabasePool};
 use crate::mtproto_uploader::MTProtoUploader;
 use crate::yt_dlp_interface::YoutubeFetcher;
 use crate::handlers::admin::is_admin;
 use crate::handlers::subscription::check_subscription;
 use crate::utils::progress_bar::ProgressBar;
+use crate::utils::{retry, task_manager::TaskManager};
 use crate::telegram_bot_api_uploader::{send_video_with_progress_botapi, send_audio_with_progress_botapi};
 
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);   // 10 minutes
 const TELEGRAM_BOT_API_FILE_LIMIT: u64 = 48 * 1024 * 1024; // 48MB
 
-async fn get_subscription_required() -> Result<bool, anyhow::Error> {
-    let db_path = crate::database::get_database_path();
-    let result = tokio::task::spawn_blocking(move || -> RusqliteResult<bool> {
-        let conn = Connection::open(&db_path)?;
-        let value: String = conn.query_row(
+async fn get_subscription_required(db_pool: &DatabasePool) -> Result<bool, anyhow::Error> {
+    let result = db_pool.execute_with_timeout(|conn| {
+        match conn.query_row(
             "SELECT value FROM settings WHERE key = 'subscription_required'",
             [],
-            |row| row.get(0),
-        )?;
-        Ok(value == "true")
-    }).await.map_err(|e| anyhow::anyhow!("Task join error: {}", e))?;
-    
-    Ok(result?)
-}
-
-async fn get_quality_preference(user_id: i64) -> Result<String, anyhow::Error> {
-    let db_path = crate::database::get_database_path();
-    let result = tokio::task::spawn_blocking(move || -> RusqliteResult<String> {
-        let conn = Connection::open(&db_path)?;
-        let value = conn.query_row(
-            "SELECT quality_preference FROM users WHERE telegram_id = ?1",
-            params![user_id],
-            |row| row.get(0),
-        );
-        match value {
-            Ok(v) => Ok(v),
-            Err(_) => Ok("best".to_string())
+            |row| Ok(row.get::<_, String>(0)? == "true")
+        ) {
+            Ok(value) => Ok(value),
+            Err(_) => Ok(true) // Default to true
         }
-    }).await.map_err(|e| anyhow::anyhow!("Task join error: {}", e))?;
-    
-    Ok(result?)
+    }).await?;
+    Ok(result)
 }
 
-pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, mtproto_uploader: Arc<MTProtoUploader>) -> Result<(), anyhow::Error> {
+pub async fn link_handler(
+    bot: Bot,
+    msg: Message,
+    fetcher: Arc<YoutubeFetcher>,
+    mtproto_uploader: Arc<MTProtoUploader>,
+    db_pool: Arc<DatabasePool>,
+    _task_manager: Arc<tokio::sync::Mutex<TaskManager>>,
+    upload_semaphore: Arc<tokio::sync::Semaphore>
+) -> Result<(), anyhow::Error> {
     if let Err(e) = update_user_activity(msg.chat.id.0) {
         log::error!("Failed to update user activity: {}", e);
     }
@@ -64,10 +56,14 @@ pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, 
             Some(un) => Some(un.to_string()),
             None => msg.from.clone().and_then(|u| u.username.clone()),
         };
+        
         let mut progress_bar = ProgressBar::new(bot.clone(), msg.chat.id);
         progress_bar.start("🎬 Starting...").await?;
+        
+        // Get upload permit to limit concurrent uploads - must stay in scope for the entire function
+        let _upload_permit = upload_semaphore.acquire().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
 
-        let subscription_required = get_subscription_required().await.unwrap_or(true);
+        let subscription_required = get_subscription_required(&db_pool).await.unwrap_or(true);
 
         if subscription_required {
             let is_user_admin = is_admin(&msg).await;
@@ -77,105 +73,116 @@ pub async fn link_handler(bot: Bot, msg: Message, fetcher: Arc<YoutubeFetcher>, 
             }
         }
 
-        let quality_preference = get_quality_preference(msg.chat.id.0).await.unwrap_or("best".to_string());
+        // Get user quality preference with caching
+        let quality_preference = db_pool.get_user_quality(msg.chat.id.0).await.unwrap_or_else(|_| "best".to_string());
 
         let is_audio = quality_preference == "audio";
 
-        let filename_stem = format!("output/{}", Uuid::new_v4());
-        match fetcher.download_video_from_url(text.to_string(), &filename_stem, &quality_preference, &mut progress_bar).await {
-            Ok(path) => {
-                log::info!("Video downloaded to: {:?}", path);
-                let file_size = fs::metadata(&path)?.len();
-                if file_size > TELEGRAM_BOT_API_FILE_LIMIT {
-                    // MTProto upload
-                    progress_bar.update(85, Some("📤 Starting upload...")).await?;
-                    // Start chat action
-                    let chat_action_task = tokio::spawn({
-                        let bot = bot.clone();
-                        let chat_id = msg.chat.id;
-                        async move {
-                            loop {
-                                let action = if is_audio {
-                                    teloxide::types::ChatAction::UploadDocument
-                                } else {
-                                    teloxide::types::ChatAction::UploadVideo
-                                };
-                                if bot.send_chat_action(chat_id, action).await.is_err() {
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_secs(4)).await;
-                            }
-                        }
-                    });
-                    // Realistic progress simulation in parallel with download
-                    let progress_simulation = {
-                        let mut pb = progress_bar.clone();
-                        let size = file_size;
-                        tokio::spawn(async move {
-                            let estimated_seconds = (size as f64 / 1_500_000.0) as u64; // ~1.5MB/s
-                            let steps = std::cmp::min(12, estimated_seconds); // 12 шагов максимум
-                            for i in 1..=steps {
-                                let percentage = 85 + ((i as f64 / steps as f64) * 13.0) as u8; // 85-98%
-                                let info = format!("📤 Uploading... {:.0}%", ((i as f64 / steps as f64) * 100.0));
-                                let _ = pb.update(percentage, Some(&info)).await;
-                                let delay = std::cmp::max(400, estimated_seconds * 1000 / steps);
-                                tokio::time::sleep(Duration::from_millis(delay)).await;
-                            }
-                        })
-                    };
-                    // Actual download without progress
-                    let upload_result = if is_audio {
+        // Download with timeout and retry - without progress bar during this since it causes borrowing issues
+        let download_result = retry::retry_with_backoff(3, || async {
+            timeout(DOWNLOAD_TIMEOUT, async {
+                let file_stem = format!("output/{}", Uuid::new_v4());
+                fetcher.download_video_from_url(text.to_string(), &file_stem, &quality_preference, &mut ProgressBar::new_silent()).await
+            }).await
+        }).await;
+        
+        let path = match download_result {
+            Ok(path) => path?,
+            Err(_) => { // This handles both timeout and retries failure
+                progress_bar.delete().await?;
+                bot.send_message(msg.chat.id, "⏰ Download timeout or failed - please check the link").await?;
+                return Ok(());
+            }
+        };
+
+        // Create RAII wrapper for file cleanup
+        let _temp_file = TempFile::new(path.clone());
+
+        let file_size = fs::metadata(&path)?.len();
+        
+        if file_size > TELEGRAM_BOT_API_FILE_LIMIT {
+            // MTProto upload with timeout and retry
+            progress_bar.update(85, Some("📤 Starting upload...")).await?;
+            
+            let upload_result = retry::retry_with_backoff(3, || async {
+                timeout(UPLOAD_TIMEOUT, async {
+                    if is_audio {
                         mtproto_uploader.upload_audio(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
                     } else {
                         mtproto_uploader.upload_video(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
-                    };
-                    // Stop simulation and chat action
-                    progress_simulation.abort();
-                    chat_action_task.abort();
-                    match upload_result {
-                        Ok(_) => {
-                            // IMMEDIATELY delete the progress bar - video already sent via MTProto
-                            progress_bar.delete().await?;
-                        }
-                        Err(_e) => {
-                            progress_bar.delete().await?;
-                            bot.send_message(msg.chat.id, "❌ Upload failed").await?;
-                        }
                     }
-                } else {
-                    // Regular upload via Bot API
-                    progress_bar.update(90, Some("📤 Sending...")).await?;
-                    let send_res = if is_audio {
-                        send_audio_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut progress_bar).await
+                }).await
+            }).await;
+            
+            match upload_result {
+                Ok(_) => {
+                    progress_bar.update(100, Some("✅ Done!")).await?;
+                    tokio::time::sleep(Duration::from_millis(500)).await; // Brief pause to show completion
+                    progress_bar.delete().await?;
+                    log::info!("Video uploaded successfully for chat {}", msg.chat.id.0);
+                }
+                Err(e) => {
+                    progress_bar.delete().await?;
+                    let error_msg = if let Some(wait_seconds) = crate::utils::retry::extract_flood_wait(&e.to_string()) {
+                        format!("⏳ Rate limited. Please wait {} seconds and try again.", wait_seconds)
                     } else {
-                        send_video_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut progress_bar).await
+                        "❌ Upload failed - please try again later".to_string()
                     };
-                    match send_res {
-                        Ok(_) => {
-                            // IMMEDIATELY delete the progress bar - video sent
-                            // progress_bar.delete().await?;
-                            // send_video_with_progress_botapi already deletes the progress bar
-                        },
-                        Err(_e) => {
-                            progress_bar.delete().await?;
-                            bot.send_message(msg.chat.id, "❌ Send failed").await?;
-                        }
+                    bot.send_message(msg.chat.id, error_msg).await?;
+                }
+            }
+        } else {
+            // Regular upload via Bot API with timeout and retry - no progress bar to avoid borrowing issues
+            let send_result = retry::retry_with_backoff(3, || async {
+                timeout(UPLOAD_TIMEOUT, async {
+                    if is_audio {
+                        send_audio_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut ProgressBar::new_silent()).await
+                    } else {
+                        send_video_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut ProgressBar::new_silent()).await
                     }
+                }).await
+            }).await;
+            
+            match send_result {
+                Ok(_) => {
+                    // Progress bar already handled by send functions
+                },
+                Err(_e) => {
+                    progress_bar.delete().await?;
+                    bot.send_message(msg.chat.id, "❌ Send failed after retries").await?;
                 }
-                // Logging and cleanup
-                if let Err(_e) = log_download(msg.chat.id.0, text) {
-                    log::error!("Failed to log download: {}", _e);
-                }
-                let _ = fs::remove_file(&path);
             }
-            Err(_e) => {
-                progress_bar.delete().await?;
-                bot.send_message(msg.chat.id, "❌ Download failed").await?;
-            }
+        }
+
+        // Logging and cleanup
+        if let Err(_e) = log_download(msg.chat.id.0, text) {
+            log::error!("Failed to log download: {}", _e);
         }
     } else {
         bot.send_message(msg.chat.id, "Please send a valid TikTok link.").await?;
     }
 
     Ok(())
+}
+
+// RAII for automatic file cleanup
+struct TempFile {
+    path: PathBuf,
+}
+
+impl TempFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let path = self.path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                log::warn!("Failed to cleanup temp file {}: {}", path.display(), e);
+            }
+        });
+    }
 }

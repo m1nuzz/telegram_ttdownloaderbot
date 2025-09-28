@@ -6,9 +6,11 @@ use std::fs;
 
 use anyhow::Error;
 use crate::commands::Command;
+use crate::database::DatabasePool;
 use crate::handlers::{admin_command_handler, callback_handler, command_handler, link_handler, settings_text_handler, format_text_handler, subscription_text_handler, back_text_handler, set_quality_h265_text_handler, set_quality_h264_text_handler, set_quality_audio_text_handler, enable_subscription_text_handler, disable_subscription_text_handler};
 use crate::yt_dlp_interface::{YoutubeFetcher, is_executable_present, ensure_binaries};
 use crate::mtproto_uploader::MTProtoUploader;
+use crate::utils::task_manager::TaskManager;
 use teloxide::dptree;
 
 #[cfg(not(target_os = "android"))]
@@ -178,6 +180,15 @@ async fn main() -> Result<(), Error> {
         }
     };
 
+    // Create database pool and task manager
+    let db_pool = Arc::new(DatabasePool::new(
+        crate::database::get_database_path(),
+        3 // Maximum 3 simultaneous database connections
+    ));
+    
+    let task_manager = Arc::new(tokio::sync::Mutex::new(TaskManager::new(2))); // For progress tasks
+    let upload_semaphore = Arc::new(tokio::sync::Semaphore::new(2)); // Maximum 2 simultaneous uploads
+
     let bot = Bot::from_env();
 
     let handler = dptree::entry()
@@ -197,20 +208,31 @@ async fn main() -> Result<(), Error> {
         .branch(Update::filter_message().filter(|msg: Message| msg.text() == Some("Enable Subscription")).endpoint(enable_subscription_text_handler))
         .branch(Update::filter_message().filter(|msg: Message| msg.text() == Some("Disable Subscription")).endpoint(disable_subscription_text_handler))
         .branch(Update::filter_message().filter(|msg: Message| msg.text() == Some("Back")).endpoint(back_text_handler))
-        .branch(Update::filter_message().endpoint(|msg: Message, bot: Bot, fetcher: Arc<YoutubeFetcher>, mtproto_uploader: Arc<MTProtoUploader>| async move {
-            link_handler(bot, msg, fetcher, mtproto_uploader).await
-        }))
+        .branch(Update::filter_message().endpoint(link_handler))
         .branch(Update::filter_callback_query().endpoint(callback_handler));
 
     log::info!("Bot initialization completed in {:.2?}", start_time.elapsed());
     log::info!("Starting to dispatch updates...");
 
-    Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![fetcher, mtproto_uploader])
+    let mut dispatcher = Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![fetcher, mtproto_uploader, db_pool, task_manager.clone(), upload_semaphore])
         .enable_ctrlc_handler()
-        .build()
-        .dispatch()
-        .await;
+        .build();
 
+    // Run dispatcher with graceful shutdown
+    tokio::select! {
+        _ = dispatcher.dispatch() => {},
+        _ = tokio::signal::ctrl_c() => {
+            log::info!("Received Ctrl+C, shutting down...");
+        }
+    }
+
+    // Cleanup on shutdown
+    {
+        let mut tm = task_manager.lock().await;
+        tm.shutdown().await;
+    }
+    
+    log::info!("Bot shutdown complete");
     Ok(())
 }
