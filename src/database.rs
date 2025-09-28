@@ -1,8 +1,21 @@
 use rusqlite::{Connection, Result};
 use std::env;
 
+fn get_database_path() -> String {
+    // First, check for the DATABASE_PATH environment variable.
+    if let Ok(db_path) = env::var("DATABASE_PATH") {
+        return db_path;
+    }
+
+    // If the environment variable is not set, default to a path next to the executable.
+    let mut path = env::current_exe().expect("Failed to get current exe path");
+    path.pop(); // Remove the executable name, leaving the directory.
+    path.push("tiktok_downloader.db"); // Add the db file name.
+    path.to_str().expect("Failed to construct database path").to_string()
+}
+
 pub fn init_database() -> Result<()> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let db_path = get_database_path();
     let conn = Connection::open(db_path)?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, telegram_id BIGINT UNIQUE NOT NULL, last_active DATETIME DEFAULT CURRENT_TIMESTAMP, quality_preference TEXT DEFAULT 'h264')",
@@ -82,7 +95,7 @@ pub fn init_database() -> Result<()> {
 }
 
 pub fn update_user_activity(user_id: i64) -> Result<()> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let db_path = get_database_path();
     let conn = Connection::open(db_path)?;
     conn.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?1)", [user_id])?;
     conn.execute("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE telegram_id = ?1", [user_id])?;
@@ -90,7 +103,7 @@ pub fn update_user_activity(user_id: i64) -> Result<()> {
 }
 
 pub fn log_download(telegram_id: i64, video_url: &str) -> Result<()> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let db_path = get_database_path();
     let conn = Connection::open(db_path)?;
     // Update user activity first (to ensure the user exists in the database)
     update_user_activity(telegram_id)?;
@@ -109,6 +122,7 @@ mod tests {
         // Create a temporary database for testing
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
+        
         unsafe {
             env::set_var("DATABASE_PATH", db_path.to_str().unwrap());
         }
@@ -127,6 +141,9 @@ mod tests {
         
         // There should be at least 5 tables: users, downloads, admins, channels, settings
         assert!(table_count >= 5);
+        unsafe {
+            env::remove_var("DATABASE_PATH");
+        }
     }
     
     #[test]
@@ -156,6 +173,9 @@ mod tests {
         ).unwrap();
         
         assert_eq!(count, 1);
+        unsafe {
+            env::remove_var("DATABASE_PATH");
+        }
     }
     
     #[test]
@@ -186,5 +206,8 @@ mod tests {
         ).unwrap();
         
         assert_eq!(count, 1);
+        unsafe {
+            env::remove_var("DATABASE_PATH");
+        }
     }
 }

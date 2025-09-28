@@ -160,18 +160,8 @@ async fn main() -> Result<(), Error> {
 
     log::info!("Auto-update functionality initialized");
 
-    let db_path_env = env::var("DATABASE_PATH").unwrap_or_else(|_| {
-        log::error!("DATABASE_PATH environment variable not set.");
-        panic!("DATABASE_PATH must be set");
-    });
-    log::info!("DATABASE_PATH: {}", db_path_env);
-
-    // Create directories if they don't exist
-    fs::create_dir_all(&output_dir)?;
-    log::info!("Contents of output directory: {:?}", fs::read_dir(&output_dir)?.map(|e| e.unwrap().file_name()).collect::<Vec<_>>());
-
     if let Err(e) = database::init_database() {
-        log::error!("Failed to initialize the database at {}: {}", db_path_env, e);
+        log::error!("Failed to initialize the database: {}", e);
         return Err(e.into());
     }
     log::info!("Database initialized successfully.");
