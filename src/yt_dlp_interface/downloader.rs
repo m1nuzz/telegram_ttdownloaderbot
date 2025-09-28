@@ -7,12 +7,6 @@ use anyhow::Result;
 #[cfg(target_os = "macos")]
 use sevenz_rust::decompress_file as decompress_7z;
 
-#[cfg(all(unix, not(target_os = "macos")))]
-use tar::Archive;
-
-#[cfg(all(unix, not(target_os = "macos")))]
-use xz2::read::XzDecoder;
-
 pub async fn download_file(url: &str, path: &PathBuf) -> Result<()> {
     log::info!("Downloading from {} to {:?}", url, path);
     
