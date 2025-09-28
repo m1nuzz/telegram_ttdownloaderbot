@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result};
 use std::env;
 
-fn get_database_path() -> String {
+pub fn get_database_path() -> String {
     // First, check for the DATABASE_PATH environment variable.
     if let Ok(db_path) = env::var("DATABASE_PATH") {
         return db_path;

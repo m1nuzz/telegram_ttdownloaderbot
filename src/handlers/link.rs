@@ -1,6 +1,6 @@
 use teloxide::prelude::*;
 use rusqlite::{Connection, Result as RusqliteResult, params};
-use std::env;
+
 use std::fs;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use crate::telegram_bot_api_uploader::{send_video_with_progress_botapi, send_aud
 const TELEGRAM_BOT_API_FILE_LIMIT: u64 = 48 * 1024 * 1024; // 48MB
 
 async fn get_subscription_required() -> Result<bool, anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let db_path = crate::database::get_database_path();
     let result = tokio::task::spawn_blocking(move || -> RusqliteResult<bool> {
         let conn = Connection::open(&db_path)?;
         let value: String = conn.query_row(
@@ -32,7 +32,7 @@ async fn get_subscription_required() -> Result<bool, anyhow::Error> {
 }
 
 async fn get_quality_preference(user_id: i64) -> Result<String, anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
+    let db_path = crate::database::get_database_path();
     let result = tokio::task::spawn_blocking(move || -> RusqliteResult<String> {
         let conn = Connection::open(&db_path)?;
         let value = conn.query_row(
