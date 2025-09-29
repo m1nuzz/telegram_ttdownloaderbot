@@ -138,11 +138,9 @@ pub async fn link_handler(
             let upload_result = retry::retry_with_backoff(3, || async {
                 timeout(UPLOAD_TIMEOUT, async {
                     if is_audio {
-                        log::info!("Uploading as audio file: {:?}", path);
-                        mtproto_uploader.upload_audio(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
+                        mtproto_uploader.upload_audio(msg.chat.id.0, username.clone(), &path, "", &mut ProgressBar::new_silent()).await
                     } else {
-                        log::info!("Uploading as video file: {:?}", path);
-                        mtproto_uploader.upload_video(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
+                        mtproto_uploader.upload_video(msg.chat.id.0, username.clone(), &path, "", &mut ProgressBar::new_silent()).await
                     }
                 }).await
             }).await;
@@ -169,11 +167,9 @@ pub async fn link_handler(
             let send_result = retry::retry_with_backoff(3, || async {
                 timeout(UPLOAD_TIMEOUT, async {
                     if is_audio {
-                        log::info!("Sending as audio file via Bot API: {:?}", path);
-                        send_audio_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut ProgressBar::new_silent()).await
+                        send_audio_with_progress_botapi(&bot.token(), msg.chat.id, &path, None, &mut ProgressBar::new_silent()).await
                     } else {
-                        log::info!("Sending as video file via Bot API: {:?}", path);
-                        send_video_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut ProgressBar::new_silent()).await
+                        send_video_with_progress_botapi(&bot.token(), msg.chat.id, &path, None, &mut ProgressBar::new_silent()).await
                     }
                 }).await
             }).await;
