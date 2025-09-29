@@ -375,11 +375,16 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        let path = self.path.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tokio::fs::remove_file(&path).await {
-                log::warn!("Failed to cleanup temp file {}: {}", path.display(), e);
-            }
-        });
+        // Use blocking operation in Drop for guaranteed cleanup
+        // Drop should not panic, so we handle errors
+        if std::thread::panicking() {
+            // If already panicking, skip cleanup to avoid double panic
+            log::warn!("Skipping temp file cleanup during panic: {}", self.path.display());
+            return;
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(_) => log::debug!("Successfully removed temp file: {}", self.path.display()),
+            Err(e) => log::warn!("Failed to cleanup temp file {}: {}", self.path.display(), e),
+        }
     }
 }

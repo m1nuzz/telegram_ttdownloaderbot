@@ -2,13 +2,14 @@ use rusqlite::{Connection, Result as SqliteResult, params};
 use tokio::sync::{Semaphore, Mutex};
 use tokio::time::{timeout, Duration};
 use std::sync::Arc;
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 pub struct DatabasePool {
     db_path: String,
     connection_semaphore: Arc<Semaphore>,
-    // Cache for frequently used data
-    user_cache: Arc<Mutex<HashMap<i64, UserInfo>>>,
+    // LRU cache with limit of 1000 users
+    user_cache: Arc<Mutex<LruCache<i64, UserInfo>>>,
 }
 
 #[derive(Clone)]
@@ -22,7 +23,10 @@ impl DatabasePool {
         Self {
             db_path,
             connection_semaphore: Arc::new(Semaphore::new(max_connections)),
-            user_cache: Arc::new(Mutex::new(HashMap::new())),
+            // LRU cache automatically removes least recently used entries when limit reached
+            user_cache: Arc::new(Mutex::new(
+                LruCache::new(NonZeroUsize::new(1000).unwrap())
+            )),
         }
     }
 
@@ -65,7 +69,7 @@ impl DatabasePool {
 
     /// Get user quality preference with caching
     pub async fn get_user_quality(&self, user_id: i64) -> Result<String, anyhow::Error> {
-        // Check cache
+        // Check LRU cache
         {
             let mut cache = self.user_cache.lock().await;
             if let Some(user_info) = cache.get(&user_id) {
@@ -75,8 +79,9 @@ impl DatabasePool {
                     return Ok(user_info.quality_preference.clone());
                 }
                 log::info!("Cache expired for user {}, removing from cache", user_id);
-                // Remove expired entry
-                cache.remove(&user_id);
+                // LRU automatically moves the element to the front when accessed with get,
+                // so we need to remove and re-add if it's expired
+                cache.pop(&user_id);
             }
         }
 
@@ -102,11 +107,11 @@ impl DatabasePool {
             }
         }).await?;
 
-        // Update cache
+        // Update LRU cache (put automatically evicts old entries)
         {
             let mut cache = self.user_cache.lock().await;
             log::info!("Caching quality preference for user {}: {}", user_id, quality);
-            cache.insert(
+            cache.put(
                 user_id,
                 UserInfo {
                     quality_preference: quality.clone(),
@@ -121,7 +126,7 @@ impl DatabasePool {
     /// Invalidate user quality cache
     pub async fn invalidate_user_quality_cache(&self, user_id: i64) {
         let mut cache = self.user_cache.lock().await;
-        cache.remove(&user_id);
+        cache.pop(&user_id);
         log::info!("Invalidated cached quality preference for user {}", user_id);
     }
 }

@@ -174,14 +174,38 @@ pub async fn send_audio_with_progress_botapi(
     let len = file.metadata().await?.len();
 
     let pb_clone = progress_bar.clone();
+    // Keep track of the last update time to implement throttling
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    let last_update_time = Arc::new(Mutex::new(std::time::Instant::now()));
+    let last_update_time_clone = last_update_time.clone();
+    
     let reader = ProgressReader::new(file, len, move |uploaded, total| {
         let overall = 80.0 + (uploaded as f64 / total as f64) * 20.0;
         let mut pb2 = pb_clone.clone();
         let text = format!("📤 Uploading... {:.1}/{:.1} MB",
             uploaded as f64 / 1_048_576.0,
             total as f64 / 1_048_576.0);
+        let last_update_time = last_update_time_clone.clone();
+        
         tokio::spawn(async move {
-            let _ = pb2.update(overall.min(100.0) as u8, Some(&text)).await;
+            // Implement throttling: minimum 1.5 seconds between updates
+            let min_update_interval = std::time::Duration::from_millis(1500);
+            let now = std::time::Instant::now();
+            
+            let should_update = {
+                let mut last_time = last_update_time.lock().await;
+                if now.duration_since(*last_time) >= min_update_interval {
+                    *last_time = now;
+                    true
+                } else {
+                    false
+                }
+            };
+            
+            if should_update || overall >= 100.0 {
+                let _ = pb2.update(overall.min(100.0) as u8, Some(&text)).await;
+            }
         });
     });
 

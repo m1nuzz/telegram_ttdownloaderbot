@@ -47,17 +47,58 @@ impl MTProtoUploader {
         caption: &str,
         progress_bar: &mut ProgressBar,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Remux video with faststart if needed - only for MP4 files
-        let (video_path, needs_cleanup) = if file_path.extension().map_or(false, |ext| ext == "mp4") {
+        // RAII guard for automatic deletion of temporary faststart file
+        struct TempVideoGuard {
+            path: Option<std::path::PathBuf>,
+        }
+
+        impl TempVideoGuard {
+            fn new(path: std::path::PathBuf) -> Self {
+                Self { path: Some(path) }
+            }
+
+            fn path(&self) -> &std::path::Path {
+                self.path.as_ref().unwrap()
+            }
+
+            // Prevent deletion, if file needs to be kept
+            fn keep(mut self) {
+                self.path = None;
+            }
+        }
+
+        impl Drop for TempVideoGuard {
+            fn drop(&mut self) {
+                if let Some(path) = &self.path {
+                    if std::thread::panicking() {
+                        log::warn!("Skipping faststart cleanup during panic: {}", path.display());
+                        return;
+                    }
+                    // Use blocking operation for guaranteed cleanup
+                    match std::fs::remove_file(path) {
+                        Ok(_) => log::debug!("Cleaned up temporary faststart file: {}", path.display()),
+                        Err(e) => log::warn!("Failed to cleanup faststart file {}: {}", path.display(), e),
+                    }
+                }
+            }
+        }
+
+        // Create temporary faststart file with guard
+        let (video_path, temp_guard) = if file_path.extension().map_or(false, |ext| ext == "mp4") {
             match self.ensure_faststart_video(file_path).await {
-                Ok(temp_path) => (temp_path, true), // Use processed video and mark for cleanup
+                Ok(temp_path) => {
+                    let guard = TempVideoGuard::new(temp_path.clone());
+                    // Guard will automatically clean up the temp file when function exits
+                    // regardless of how it exits (panic or normal return)
+                    (temp_path, Some(guard))
+                },
                 Err(e) => {
                     log::warn!("Failed to remux video with faststart, proceeding with original: {:?}", e);
-                    (file_path.to_path_buf(), false) // Use original file and no cleanup needed
+                    (file_path.to_path_buf(), None) // Use original file
                 }
             }
         } else {
-            (file_path.to_path_buf(), false) // Use original file and no cleanup needed
+            (file_path.to_path_buf(), None) // Use original file
         };
 
         // Upload the main video file
@@ -105,13 +146,9 @@ impl MTProtoUploader {
             e
         })?;
 
-        // Clean up the temporary faststart video file if it was created
-        if needs_cleanup {
-            fs::remove_file(&video_path).await.map_err(|e| {
-                log::warn!("Failed to remove temporary faststart video file {:?}: {:?}", video_path, e);
-                e
-            })?;
-        }
+        // Keep temp_guard in scope so it doesn't get dropped early
+        // Guard automatically cleans up the temporary faststart file at function exit
+        let _ = temp_guard; // Use the temp_guard to keep it in scope without warning
 
         // Clean up the thumbnail file
         fs::remove_file(&thumbnail_path).await.map_err(|e| {

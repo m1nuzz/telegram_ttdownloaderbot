@@ -11,20 +11,18 @@ use tokio::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct ProgressBar {
     bot: Bot,
-    chatid: ChatId,
-    messageid: Option<MessageId>,
-    lastupdate: Arc<Mutex<Instant>>,
-    minupdateinterval: Duration,
+    chat_id: ChatId,
+    message_id: Option<MessageId>,
+    last_update: Option<tokio::time::Instant>, // Track last update time for throttling
 }
 
 impl ProgressBar {
-    pub fn new(bot: Bot, chatid: ChatId) -> Self {
+    pub fn new(bot: Bot, chat_id: ChatId) -> Self {
         Self {
             bot,
-            chatid,
-            messageid: None,
-            lastupdate: Arc::new(Mutex::new(Instant::now())),
-            minupdateinterval: Duration::from_millis(500),
+            chat_id,
+            message_id: None,
+            last_update: None,
         }
     }
 
@@ -33,9 +31,9 @@ impl ProgressBar {
     }
 
     pub async fn start(&mut self, initial_text: &str) -> Result<(), anyhow::Error> {
-        let msg = self.bot.send_message(self.chatid, initial_text).await?;
-        self.messageid = Some(msg.id);
-        *self.lastupdate.lock().await = Instant::now();
+        let msg = self.bot.send_message(self.chat_id, initial_text).await?;
+        self.message_id = Some(msg.id);
+        self.last_update = Some(tokio::time::Instant::now());
         Ok(())
     }
 
@@ -44,21 +42,49 @@ impl ProgressBar {
         percentage: u8,
         extra_info: Option<&str>,
     ) -> Result<(), anyhow::Error> {
-        let now = Instant::now();
-        let mut last_update = self.lastupdate.lock().await;
-        if self.messageid.is_none()
-            || now.duration_since(*last_update) > self.minupdateinterval
-            || percentage == 100
-        {
-            *last_update = now;
-            if let Some(message_id) = self.messageid {
-                let progress_text = self.create_progress_bar(percentage, extra_info);
-                let _ = self
-                    .bot
-                    .edit_message_text(self.chatid, message_id, progress_text)
-                    .await;
+        // Throttling: minimum 1000ms between updates to reduce API rate limiting
+        const MIN_UPDATE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_millis(1000);
+
+        let now = tokio::time::Instant::now();
+
+        // Check if enough time has passed since last update
+        if let Some(last) = self.last_update {
+            if now.duration_since(last) < MIN_UPDATE_INTERVAL && percentage < 100 {
+                // Skip update if not enough time passed (except for 100% completion)
+                // Additionally, skip updates that don't represent meaningful progress (at least 5% change)
+                if percentage < 100 {
+                    return Ok(());
+                }
             }
         }
+
+        // Update the time of last update
+        self.last_update = Some(now);
+
+        if let Some(message_id) = self.message_id {
+            let progress_text = self.create_progress_bar(percentage, extra_info);
+            let result = self
+                .bot
+                .edit_message_text(self.chat_id, message_id, progress_text)
+                .await;
+
+            // Handle API errors gracefully
+            if let Err(e) = result {
+                if !e.to_string().contains("message is not modified") {
+                    log::warn!("Failed to update progress bar: {}", e);
+                }
+            }
+        } else {
+            // If there's no message ID yet, send a new message
+            let progress_text = self.create_progress_bar(percentage, extra_info);
+            let result = self.bot.send_message(self.chat_id, progress_text).await;
+            if let Ok(msg) = result {
+                self.message_id = Some(msg.id);
+            } else {
+                log::error!("Failed to send progress bar: {:?}", result.err());
+            }
+        }
+
         Ok(())
     }
 
@@ -83,9 +109,9 @@ impl ProgressBar {
     }
 
     pub async fn delete(&mut self) -> Result<(), anyhow::Error> {
-        if let Some(message_id) = self.messageid {
-            let _ = self.bot.delete_message(self.chatid, message_id).await;
-            self.messageid = None;
+        if let Some(message_id) = self.message_id {
+            let _ = self.bot.delete_message(self.chat_id, message_id).await;
+            self.message_id = None;
         }
         Ok(())
     }

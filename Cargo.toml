@@ -36,5 +36,9 @@ serde_json = "1.0.145"
 tempfile = "3.23.0"
 feed-rs = "2.3.1"
 quick-xml = "0.38.3"
+lru = "0.16.1"
+futures = "0.3.31"
+glob = "0.3.3"
+
 [dev-dependencies]
 serial_test = "3.2.0"
