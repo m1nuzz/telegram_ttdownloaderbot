@@ -14,6 +14,25 @@ pub fn get_database_path() -> String {
     path.to_str().expect("Failed to construct database path").to_string()
 }
 
+#[cfg(test)]
+fn update_user_activity(user_id: i64) -> Result<()> {
+    let db_path = get_database_path();
+    let conn = Connection::open(db_path)?;
+    conn.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?1)", [user_id])?;
+    conn.execute("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE telegram_id = ?1", [user_id])?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn log_download(telegram_id: i64, video_url: &str) -> Result<()> {
+    let db_path = get_database_path();
+    let conn = Connection::open(db_path)?;
+    // Update user activity first (to ensure the user exists in the database)
+    update_user_activity(telegram_id)?;
+    conn.execute("INSERT INTO downloads (user_telegram_id, video_url) VALUES (?1, ?2)", (telegram_id, video_url))?;
+    Ok(())
+}
+
 pub fn init_database() -> Result<()> {
     let db_path = get_database_path();
     let conn = Connection::open(db_path)?;
@@ -94,22 +113,7 @@ pub fn init_database() -> Result<()> {
     Ok(())
 }
 
-pub fn update_user_activity(user_id: i64) -> Result<()> {
-    let db_path = get_database_path();
-    let conn = Connection::open(db_path)?;
-    conn.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?1)", [user_id])?;
-    conn.execute("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE telegram_id = ?1", [user_id])?;
-    Ok(())
-}
 
-pub fn log_download(telegram_id: i64, video_url: &str) -> Result<()> {
-    let db_path = get_database_path();
-    let conn = Connection::open(db_path)?;
-    // Update user activity first (to ensure the user exists in the database)
-    update_user_activity(telegram_id)?;
-    conn.execute("INSERT INTO downloads (user_telegram_id, video_url) VALUES (?1, ?2)", (telegram_id, video_url))?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

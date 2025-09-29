@@ -1,10 +1,11 @@
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Result, params};
 use std::env;
 use std::sync::Arc;
 
 use crate::commands::AdminCommand;
+use crate::database::DatabasePool;
 
 pub async fn is_admin(msg: &Message) -> bool {
     let admin_ids_str = env::var("ADMIN_IDS").unwrap_or_default();
@@ -16,7 +17,7 @@ pub async fn is_admin(msg: &Message) -> bool {
     admin_ids.contains(&msg.chat.id.0)
 }
 
-pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
+pub async fn admin_command_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
     if !is_admin(&msg).await {
         bot.send_message(msg.chat.id, "This command is for admins only.").await?;
         return Ok(())
@@ -31,8 +32,6 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
         }
     };
 
-    let db_path = Arc::new(env::var("DATABASE_PATH").expect("DATABASE_PATH must be set"));
-
     match cmd {
         AdminCommand::AddChannel(id_name) => {
             let parts: Vec<&str> = id_name.splitn(2, ' ').collect();
@@ -41,11 +40,10 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
                 let name = parts[1].to_string();
                 let id_cloned_for_format = id.clone();
                 let name_cloned_for_format = name.clone();
-                let db_path_cloned = db_path.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let conn = Connection::open(&*db_path_cloned)?;
-                    conn.execute("INSERT OR REPLACE INTO channels (channel_id, channel_name) VALUES (?1, ?2)", params![id.clone(), name.clone()])
-                }).await.unwrap();
+                
+                let result = db_pool.execute_with_timeout(move |conn| {
+                    conn.execute("INSERT OR REPLACE INTO channels (channel_id, channel_name) VALUES (?1, ?2)", params![id, name])
+                }).await;
 
                 match result {
                     Ok(_) => {
@@ -53,7 +51,7 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
                     }
                     Err(e) => {
                         log::error!("AddChannel DB error: {}", e);
-                        bot.send_message(msg.chat.id, "Failed to delete channel.").await?;
+                        bot.send_message(msg.chat.id, "Failed to add channel.").await?;
                     }
                 }
             } else {
@@ -62,11 +60,10 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
         }
         AdminCommand::DelChannel(id) => {
             let id_cloned_for_format = id.clone();
-            let db_path_cloned = db_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                let conn = Connection::open(&*db_path_cloned)?;
-                conn.execute("DELETE FROM channels WHERE channel_id = ?1", params![id.clone()])
-            }).await.unwrap();
+            
+            let result = db_pool.execute_with_timeout(move |conn| {
+                conn.execute("DELETE FROM channels WHERE channel_id = ?1", params![id])
+            }).await;
 
             match result {
                 Ok(changes) => {
@@ -84,9 +81,7 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
             }
         }
         AdminCommand::ListChannels => {
-            let db_path_cloned = db_path.clone();
-            let result: Result<Vec<(String, String)>, rusqlite::Error> = tokio::task::spawn_blocking(move || {
-                let conn = Connection::open(&*db_path_cloned)?;
+            let result = db_pool.execute_with_timeout(|conn| {
                 let mut stmt = conn.prepare("SELECT channel_id, channel_name FROM channels")?;
                 let channels_iter = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
                 let mut channels = Vec::new();
@@ -94,7 +89,7 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
                     channels.push(channel_result?);
                 }
                 Ok(channels)
-            }).await.unwrap();
+            }).await;
 
             match result {
                 Ok(channels) => {
@@ -111,9 +106,7 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
             }
         }
         AdminCommand::ToggleSubscription => {
-            let db_path_cloned = db_path.clone();
-            let result: Result<bool, rusqlite::Error> = tokio::task::spawn_blocking(move || {
-                let conn = Connection::open(&*db_path_cloned)?;
+            let result = db_pool.execute_with_timeout(|conn| {
                 let current_value: String = conn.query_row(
                     "SELECT value FROM settings WHERE key = 'subscription_required'",
                     [],
@@ -125,7 +118,7 @@ pub async fn admin_command_handler(bot: Bot, msg: Message) -> Result<(), anyhow:
                     params![new_value.to_string()],
                 )?;
                 Ok(new_value)
-            }).await.unwrap();
+            }).await;
 
             match result {
                 Ok(new_value) => {

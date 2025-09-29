@@ -56,15 +56,14 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
                 cmd.arg("--format").arg("bestvideo[vcodec~='hevc|bytevc1'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
             }
             "h264" => {
-                // Сортировка: предпочитаем высокое разрешение, битрейт и h264 (avc)
-                cmd.arg("--format-sort").arg("res,br,vcodec:avc");
-                // Формат: лучшее видео с h264 + лучшее аудио, fallback на лучший mp4
-                cmd.arg("--format").arg("bestvideo[vcodec~='avc1|h264'][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
+                // Для h264: использовать только h264 форматы, выбираем лучший доступный
+                cmd.arg("--format").arg("best[ext=mp4][vcodec=h264][height<=1080]/best[ext=mp4][vcodec=h264]/best[ext=mp4]");
             }
             "audio" => {
-                // Для аудио оставляем как есть, или оптимизируйте аналогично
-                cmd.arg("--extract-audio").arg("--audio-format").arg("mp3");
-                cmd.arg("--format").arg("bestaudio[ext=m4a]/bestaudio");
+                // Для аудио: извлекаем аудио в формате mp3
+                cmd.arg("--extract-audio").arg("--audio-format").arg("mp3").arg("--audio-quality").arg("0");
+                // Более широкий формат для аудио, чтобы yt-dlp мог обработать больше типов контента
+                cmd.arg("--format").arg("bestaudio/best[ext=mp4]/best");
             }
             _ => {
                 // Fallback для других качеств
@@ -132,28 +131,79 @@ pub async fn download_video_from_url(&self,url: String,filename_stem: &str,quali
             }
         }
 
-        let status = child.wait().await?;
+        let output = child.wait_with_output().await?;
         let elapsed = start_time.elapsed();
 
-        if status.success() {
+        log::debug!("yt-dlp process finished with status: {:?}, stdout len: {}, stderr len: {}", 
+                   output.status, output.stdout.len(), output.stderr.len());
+        
+        if output.status.success() {
             // After download completion, show 80%
             progress_bar.update(80, Some("⬇️ Download completed")).await?;
             
             let parent = self.output_dir.clone();
             let stem = PathBuf::from(filename_stem);
 
+            // Log the contents of the output directory to debug what files were actually created
+            log::debug!("Looking for files in: {:?}", parent);
+            if let Ok(entries) = tokio::fs::read_dir(&parent).await {
+                let mut entry = entries;
+                while let Ok(Some(file)) = entry.next_entry().await {
+                    if let Ok(file_type) = file.file_type().await {
+                        if file_type.is_file() {
+                            if let Some(filename) = file.file_name().to_str() {
+                                if filename.starts_with(stem.to_string_lossy().as_ref()) {
+                                    let path = parent.join(filename);
+                                    log::info!("Found unexpected file for download: {:?}", path);
+                                    return Ok(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             for ext in [".mp4", ".mov", ".webm", ".mkv", ".flv", ".m4a", ".mp3", ".ogg", ".aac"] {
                 let alt_path = parent.join(format!("{}{}", stem.to_string_lossy(), ext));
                 if alt_path.exists() {
-                    log::info!("Download completed successfully in {:.2?} for: {}", elapsed, url);
+                    log::info!("Download completed successfully in {:.2?} for: {} with file: {:?}", elapsed, url, alt_path);
                     return Ok(alt_path);
                 }
             }
+            
+            // If we can't find with expected extensions, try to find any file that starts with the stem
+            if let Ok(entries) = tokio::fs::read_dir(&parent).await {
+                let mut entry = entries;
+                while let Ok(Some(file)) = entry.next_entry().await {
+                    if let Ok(file_type) = file.file_type().await {
+                        if file_type.is_file() {
+                            if let Some(filename) = file.file_name().to_str() {
+                                if filename.starts_with(stem.to_string_lossy().as_ref()) {
+                                    let path = parent.join(filename);
+                                    log::info!("Found unexpected file for download: {:?}", path);
+                                    return Ok(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
             log::error!("Downloaded file not found after successful yt-dlp execution for: {}", url);
             Err(anyhow::anyhow!("Downloaded file not found"))
         } else {
-            log::error!("yt-dlp failed after {:.2?} for: {}", elapsed, url);
-            Err(anyhow::anyhow!("yt-dlp failed"))
+            let stderr_output = String::from_utf8_lossy(&output.stderr);
+            let stdout_output = String::from_utf8_lossy(&output.stdout);
+            
+            log::error!("yt-dlp failed with status {:?} for URL: {}", output.status, url);
+            log::error!("yt-dlp stderr: {}", stderr_output);
+            log::error!("yt-dlp stdout: {}", stdout_output);
+            
+            // Log the command that was executed for debugging
+            log::debug!("yt-dlp command for quality '{}': url: {}", quality, url);
+            
+            // Return more informative error
+            Err(anyhow::anyhow!("yt-dlp failed: {}", stderr_output.trim()))
         }
     }
 }

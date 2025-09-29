@@ -71,8 +71,10 @@ impl DatabasePool {
             if let Some(user_info) = cache.get(&user_id) {
                 // Cache is valid for 5 minutes
                 if user_info.last_updated.elapsed() < Duration::from_secs(300) {
+                    log::info!("Using cached quality preference for user {}: {}", user_id, user_info.quality_preference);
                     return Ok(user_info.quality_preference.clone());
                 }
+                log::info!("Cache expired for user {}, removing from cache", user_id);
                 // Remove expired entry
                 cache.remove(&user_id);
             }
@@ -85,14 +87,25 @@ impl DatabasePool {
                 params![user_id],
                 |row| Ok(row.get::<_, String>(0)?)
             ) {
-                Ok(quality) => Ok(quality),
-                Err(_) => Ok("best".to_string()) // Default value
+                Ok(quality) => {
+                    log::info!("Retrieved quality preference from DB for user {}: {}", user_id, quality);
+                    Ok(quality)
+                },
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    log::info!("No quality preference found for user {}, using default", user_id);
+                    Ok("best".to_string()) // Default value
+                },
+                Err(e) => {
+                    log::error!("Error retrieving quality preference for user {} from DB: {}", user_id, e);
+                    Ok("best".to_string()) // Default value
+                }
             }
         }).await?;
 
         // Update cache
         {
             let mut cache = self.user_cache.lock().await;
+            log::info!("Caching quality preference for user {}: {}", user_id, quality);
             cache.insert(
                 user_id,
                 UserInfo {
@@ -103,5 +116,12 @@ impl DatabasePool {
         }
         
         Ok(quality)
+    }
+
+    /// Invalidate user quality cache
+    pub async fn invalidate_user_quality_cache(&self, user_id: i64) {
+        let mut cache = self.user_cache.lock().await;
+        cache.remove(&user_id);
+        log::info!("Invalidated cached quality preference for user {}", user_id);
     }
 }

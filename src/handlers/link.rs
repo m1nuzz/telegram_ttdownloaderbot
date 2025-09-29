@@ -6,7 +6,7 @@ use uuid::Uuid;
 use tokio::time::{Duration, timeout};
 use std::path::PathBuf;
 
-use crate::database::{update_user_activity, log_download, DatabasePool};
+use crate::database::DatabasePool;
 use crate::mtproto_uploader::MTProtoUploader;
 use crate::yt_dlp_interface::YoutubeFetcher;
 use crate::handlers::admin::is_admin;
@@ -42,7 +42,16 @@ pub async fn link_handler(
     _task_manager: Arc<tokio::sync::Mutex<TaskManager>>,
     upload_semaphore: Arc<tokio::sync::Semaphore>
 ) -> Result<(), anyhow::Error> {
-    if let Err(e) = update_user_activity(msg.chat.id.0) {
+    let user_id = msg.chat.id.0;
+    
+    // Update user activity using the database pool
+    let result = db_pool.execute_with_timeout(move |conn| {
+        conn.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?1)", [user_id])?;
+        conn.execute("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE telegram_id = ?1", [user_id])?;
+        Ok(())
+    }).await;
+    
+    if let Err(e) = result {
         log::error!("Failed to update user activity: {}", e);
     }
 
@@ -74,9 +83,10 @@ pub async fn link_handler(
         }
 
         // Get user quality preference with caching
-        let quality_preference = db_pool.get_user_quality(msg.chat.id.0).await.unwrap_or_else(|_| "best".to_string());
+        let quality_preference = db_pool.get_user_quality(msg.chat.id.0).await.unwrap_or_else(|_| "best" .to_string());
 
         let is_audio = quality_preference == "audio";
+        log::info!("Quality preference: {}, is_audio: {}", quality_preference, is_audio);
 
         // Download with timeout and retry - without progress bar during this since it causes borrowing issues
         let download_result = retry::retry_with_backoff(3, || async {
@@ -88,9 +98,27 @@ pub async fn link_handler(
         
         let path = match download_result {
             Ok(path) => path?,
-            Err(_) => { // This handles both timeout and retries failure
+            Err(e) => { // This handles both timeout and retries failure
                 progress_bar.delete().await?;
-                bot.send_message(msg.chat.id, "⏰ Download timeout or failed - please check the link").await?;
+                
+                // Analyze error type for more specific message
+                let error_message = if e.to_string().contains("Sign in required") {
+                    "🔒 Video requires sign in to TikTok - currently unavailable for download".to_string()
+                } else if e.to_string().contains("Video unavailable") || e.to_string().contains("Requested format is not available") {
+                    "🚫 Video is unavailable or has been removed".to_string()
+                } else if e.to_string().contains("Private video") {
+                    "🔒 Video is private and cannot be downloaded".to_string()
+                } else if e.to_string().contains("This video is age-restricted") {
+                    "🔞 Video is age-restricted and cannot be downloaded".to_string()
+                } else if e.to_string().contains("Failed to parse") || e.to_string().contains("JSON") {
+                    "🔧 Error processing TikTok API response. Please try again later.".to_string()
+                } else if e.to_string().contains("timeout") {
+                    "⏰ Download timeout - please try again".to_string()
+                } else {
+                    format!("❌ Failed to download video: {}", e.to_string().chars().take(100).collect::<String>())
+                };
+                
+                bot.send_message(msg.chat.id, error_message).await?;
                 return Ok(());
             }
         };
@@ -98,6 +126,9 @@ pub async fn link_handler(
         // Create RAII wrapper for file cleanup
         let _temp_file = TempFile::new(path.clone());
 
+        log::info!("Downloaded file path: {:?}, is_audio: {}, file_size: {}", 
+                   path, is_audio, fs::metadata(&path)?.len());
+        
         let file_size = fs::metadata(&path)?.len();
         
         if file_size > TELEGRAM_BOT_API_FILE_LIMIT {
@@ -107,8 +138,10 @@ pub async fn link_handler(
             let upload_result = retry::retry_with_backoff(3, || async {
                 timeout(UPLOAD_TIMEOUT, async {
                     if is_audio {
+                        log::info!("Uploading as audio file: {:?}", path);
                         mtproto_uploader.upload_audio(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
                     } else {
+                        log::info!("Uploading as video file: {:?}", path);
                         mtproto_uploader.upload_video(msg.chat.id.0, username.clone(), &path, text, &mut ProgressBar::new_silent()).await
                     }
                 }).await
@@ -119,7 +152,7 @@ pub async fn link_handler(
                     progress_bar.update(100, Some("✅ Done!")).await?;
                     tokio::time::sleep(Duration::from_millis(500)).await; // Brief pause to show completion
                     progress_bar.delete().await?;
-                    log::info!("Video uploaded successfully for chat {}", msg.chat.id.0);
+                    log::info!("File uploaded successfully for chat {} (audio: {})", msg.chat.id.0, is_audio);
                 }
                 Err(e) => {
                     progress_bar.delete().await?;
@@ -136,8 +169,10 @@ pub async fn link_handler(
             let send_result = retry::retry_with_backoff(3, || async {
                 timeout(UPLOAD_TIMEOUT, async {
                     if is_audio {
+                        log::info!("Sending as audio file via Bot API: {:?}", path);
                         send_audio_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut ProgressBar::new_silent()).await
                     } else {
+                        log::info!("Sending as video file via Bot API: {:?}", path);
                         send_video_with_progress_botapi(&bot.token(), msg.chat.id, &path, Some(text), &mut ProgressBar::new_silent()).await
                     }
                 }).await
@@ -145,6 +180,7 @@ pub async fn link_handler(
             
             match send_result {
                 Ok(_) => {
+                    log::info!("File sent successfully via Bot API (audio: {})", is_audio);
                     // Progress bar already handled by send functions
                 },
                 Err(_e) => {
@@ -155,7 +191,17 @@ pub async fn link_handler(
         }
 
         // Logging and cleanup
-        if let Err(_e) = log_download(msg.chat.id.0, text) {
+        let user_id = msg.chat.id.0;
+        let video_url = text.to_string();
+        let result = db_pool.execute_with_timeout(move |conn| {
+            // Update user activity first (to ensure the user exists in the database)
+            conn.execute("INSERT OR IGNORE INTO users (telegram_id) VALUES (?1)", [user_id])?;
+            conn.execute("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE telegram_id = ?1", [user_id])?;
+            conn.execute("INSERT INTO downloads (user_telegram_id, video_url) VALUES (?1, ?2)", (user_id, video_url))?;
+            Ok(())
+        }).await;
+        
+        if let Err(_e) = result {
             log::error!("Failed to log download: {}", _e);
         }
     } else {

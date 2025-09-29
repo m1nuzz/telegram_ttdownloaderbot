@@ -1,7 +1,6 @@
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton};
-use rusqlite::{Connection, params};
-use std::env;
+use rusqlite::params;
 use tokio::fs;
 use std::sync::Arc;
 
@@ -29,14 +28,16 @@ pub async fn callback_handler(bot: Bot, q: CallbackQuery, db_pool: Arc<DatabaseP
                     }).await;
                     
                     match result {
-                        Ok(_) => {
-                            bot.answer_callback_query(q.id).text(&format!("Quality set to {}", quality)).await?;
-                        },
-                        Err(e) => {
-                            log::error!("Failed to update quality preference: {}", e);
-                            bot.answer_callback_query(q.id).text("Failed to update quality preference").await?;
-                        }
-                    }
+        Ok(_) => {
+            // Invalidate the cache for this user to ensure the new quality setting is picked up immediately
+            db_pool.invalidate_user_quality_cache(user_id).await;
+            bot.answer_callback_query(q.id).text(&format!("Quality set to {}", quality)).await?;
+        },
+        Err(e) => {
+            log::error!("Failed to update quality preference: {}", e);
+            bot.answer_callback_query(q.id).text("Failed to update quality preference").await?;
+        }
+    }
                 } else {
                     match data.as_str() {
                         "settings" => {
@@ -290,20 +291,21 @@ pub async fn format_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::E
     Ok(())
 }
 
-pub async fn subscription_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
+pub async fn subscription_text_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
     if !is_admin(&msg).await {
         bot.send_message(msg.chat.id, "This option is for admins only.").await?;
         return Ok(());
     }
 
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-    let subscription_required: bool = {
-        let conn = Connection::open(&db_path).unwrap();
-        conn.query_row("SELECT value FROM settings WHERE key = 'subscription_required'", [], |row| {
+    let subscription_required: bool = db_pool.execute_with_timeout(|conn| {
+        match conn.query_row("SELECT value FROM settings WHERE key = 'subscription_required'", [], |row| {
             let value: String = row.get(0)?;
             Ok(value == "true")
-        }).unwrap_or(true)
-    };
+        }) {
+            Ok(value) => Ok(value),
+            Err(_) => Ok(true) // Default to true
+        }
+    }).await.unwrap_or(true);
 
     let toggle_button = if subscription_required {
         KeyboardButton::new("Disable Subscription")
@@ -326,67 +328,114 @@ pub async fn back_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Err
     Ok(())
 }
 
-pub async fn set_quality_h265_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-    let conn = Connection::open(db_path).unwrap();
-    conn.execute(
-        "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
-        params!["h265", msg.chat.id.0],
-    ).unwrap();
-    bot.send_message(msg.chat.id, "Quality set to h265.").reply_markup(get_format_reply_keyboard()).await?;
+pub async fn set_quality_h265_text_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
+    let result = db_pool.execute_with_timeout(move |conn| {
+        conn.execute(
+            "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
+            params!["h265", msg.chat.id.0],
+        )
+    }).await;
+
+    match result {
+        Ok(_) => {
+            // Invalidate the cache for this user to ensure the new quality setting is picked up immediately
+            db_pool.invalidate_user_quality_cache(msg.chat.id.0).await;
+            bot.send_message(msg.chat.id, "Quality set to h265.").reply_markup(get_format_reply_keyboard()).await?;
+        },
+        Err(e) => {
+            log::error!("Failed to update quality preference to h265: {}", e);
+            bot.send_message(msg.chat.id, "Failed to update quality preference.").await?;
+        }
+    }
     Ok(())
 }
 
-pub async fn set_quality_h264_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-    let conn = Connection::open(db_path).unwrap();
-    conn.execute(
-        "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
-        params!["h264", msg.chat.id.0],
-    ).unwrap();
-    bot.send_message(msg.chat.id, "Quality set to h264.").reply_markup(get_format_reply_keyboard()).await?;
+pub async fn set_quality_h264_text_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
+    let result = db_pool.execute_with_timeout(move |conn| {
+        conn.execute(
+            "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
+            params!["h264", msg.chat.id.0],
+        )
+    }).await;
+
+    match result {
+        Ok(_) => {
+            // Invalidate the cache for this user to ensure the new quality setting is picked up immediately
+            db_pool.invalidate_user_quality_cache(msg.chat.id.0).await;
+            bot.send_message(msg.chat.id, "Quality set to h264.").reply_markup(get_format_reply_keyboard()).await?;
+        },
+        Err(e) => {
+            log::error!("Failed to update quality preference to h264: {}", e);
+            bot.send_message(msg.chat.id, "Failed to update quality preference.").await?;
+        }
+    }
     Ok(())
 }
 
-pub async fn set_quality_audio_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-    let conn = Connection::open(db_path).unwrap();
-    conn.execute(
-        "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
-        params!["audio", msg.chat.id.0],
-    ).unwrap();
-    bot.send_message(msg.chat.id, "Quality set to audio.").reply_markup(get_format_reply_keyboard()).await?;
+pub async fn set_quality_audio_text_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
+    let result = db_pool.execute_with_timeout(move |conn| {
+        conn.execute(
+            "UPDATE users SET quality_preference = ?1 WHERE telegram_id = ?2",
+            params!["audio", msg.chat.id.0],
+        )
+    }).await;
+
+    match result {
+        Ok(_) => {
+            // Invalidate the cache for this user to ensure the new quality setting is picked up immediately
+            db_pool.invalidate_user_quality_cache(msg.chat.id.0).await;
+            bot.send_message(msg.chat.id, "Quality set to audio.").reply_markup(get_format_reply_keyboard()).await?;
+        },
+        Err(e) => {
+            log::error!("Failed to update quality preference to audio: {}", e);
+            bot.send_message(msg.chat.id, "Failed to update quality preference.").await?;
+        }
+    }
     Ok(())
 }
 
-pub async fn enable_subscription_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-    let db_path_cloned = Arc::new(db_path.clone());
-    let _result: Result<bool, rusqlite::Error> = tokio::task::spawn_blocking(move || {
-        let conn = Connection::open(&*db_path_cloned)?;
+pub async fn enable_subscription_text_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
+    let result = db_pool.execute_with_timeout(|conn| {
         conn.execute(
             "UPDATE settings SET value = ?1 WHERE key = 'subscription_required'",
             params!["true"],
-        )?;
-        Ok(true)
-    }).await.unwrap();
-    update_env_subscription_setting(true).await?;
-    bot.send_message(msg.chat.id, "Mandatory subscription enabled.").reply_markup(get_subscription_reply_keyboard(true)).await?;
+        )
+    }).await;
+
+    match result {
+        Ok(_) => {
+            if let Err(e) = update_env_subscription_setting(true).await {
+                log::error!("Failed to update .env file: {}", e);
+            }
+            bot.send_message(msg.chat.id, "Mandatory subscription enabled.").reply_markup(get_subscription_reply_keyboard(true)).await?;
+        },
+        Err(e) => {
+            log::error!("Database operation failed: {}", e);
+            bot.send_message(msg.chat.id, "Operation failed - please try again.").await?;
+        }
+    }
     Ok(())
 }
 
-pub async fn disable_subscription_text_handler(bot: Bot, msg: Message) -> Result<(), anyhow::Error> {
-    let db_path = env::var("DATABASE_PATH").expect("DATABASE_PATH must be set");
-    let db_path_cloned = Arc::new(db_path.clone());
-    let _result: Result<bool, rusqlite::Error> = tokio::task::spawn_blocking(move || {
-        let conn = Connection::open(&*db_path_cloned)?;
+pub async fn disable_subscription_text_handler(bot: Bot, msg: Message, db_pool: Arc<DatabasePool>) -> Result<(), anyhow::Error> {
+    let result = db_pool.execute_with_timeout(|conn| {
         conn.execute(
             "UPDATE settings SET value = ?1 WHERE key = 'subscription_required'",
             params!["false"],
-        )?;
-        Ok(false)
-    }).await.unwrap();
-    update_env_subscription_setting(false).await?;
-    bot.send_message(msg.chat.id, "Mandatory subscription disabled.").reply_markup(get_subscription_reply_keyboard(false)).await?;
+        )
+    }).await;
+
+    match result {
+        Ok(_) => {
+            if let Err(e) = update_env_subscription_setting(false).await {
+                log::error!("Failed to update .env file: {}", e);
+            }
+            bot.send_message(msg.chat.id, "Mandatory subscription disabled.").reply_markup(get_subscription_reply_keyboard(false)).await?;
+        },
+        Err(e) => {
+            log::error!("Database operation failed: {}", e);
+            bot.send_message(msg.chat.id, "Operation failed - please try again.").await?;
+        }
+    }
     Ok(())
 }
