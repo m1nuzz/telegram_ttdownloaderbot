@@ -36,7 +36,7 @@ where
                 let delta = (now - before) as u64;
                 if delta > 0 {
                     this.uploaded += delta;
-                    // Call the progress callback directly - it should be as fast as possible
+                    // Call the progress callback by spawning a task to handle async operations
                     (this.on_progress)(this.uploaded, this.total);
                 }
                 Poll::Ready(Ok(()))

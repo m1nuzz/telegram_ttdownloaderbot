@@ -1,83 +1,62 @@
-use teloxide::{prelude::*, types::{MessageId, ChatId}, requests::Requester};
-use tokio::time::{timeout, Duration, Instant};
+use anyhow::Result; 
 use std::sync::Arc;
+use teloxide::{
+    prelude::*,
+    requests::Requester,
+    types::{ChatId, MessageId},
+};
 use tokio::sync::Mutex;
-use anyhow::Result;
+use tokio::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct ProgressBar {
     bot: Bot,
-    chat_id: ChatId,
-    message_id: Option<MessageId>,
-    last_update: Arc<Mutex<Instant>>,
-    min_update_interval: Duration,
+    chatid: ChatId,
+    messageid: Option<MessageId>,
+    lastupdate: Arc<Mutex<Instant>>,
+    minupdateinterval: Duration,
 }
 
 impl ProgressBar {
-    pub fn new(bot: Bot, chat_id: ChatId) -> Self {
+    pub fn new(bot: Bot, chatid: ChatId) -> Self {
         Self {
             bot,
-            chat_id,
-            message_id: None,
-            last_update: Arc::new(Mutex::new(Instant::now())),
-            min_update_interval: Duration::from_millis(500), // Update more frequently for smoothness
+            chatid,
+            messageid: None,
+            lastupdate: Arc::new(Mutex::new(Instant::now())),
+            minupdateinterval: Duration::from_millis(500),
         }
     }
 
     pub fn new_silent() -> Self {
-        Self {
-            bot: Bot::new("DUMMY_TOKEN"), // Dummy token, as it won't be used
-            chat_id: ChatId(0), // Dummy chat_id
-            message_id: None,
-            last_update: Arc::new(Mutex::new(Instant::now())),
-            min_update_interval: Duration::from_millis(500),
-        }
+        Self::new(Bot::new("DUMMY_TOKEN"), ChatId(0))
     }
 
     pub async fn start(&mut self, initial_text: &str) -> Result<(), anyhow::Error> {
-        let msg = self.bot.send_message(self.chat_id, initial_text).await?;
-        self.message_id = Some(msg.id);
-        *self.last_update.lock().await = Instant::now();
+        let msg = self.bot.send_message(self.chatid, initial_text).await?;
+        self.messageid = Some(msg.id);
+        *self.lastupdate.lock().await = Instant::now();
         Ok(())
     }
 
-    pub async fn update(&mut self, overall_percentage: u8, extra_info: Option<&str>) -> Result<(), anyhow::Error> {
-        self.update_internal(overall_percentage, extra_info).await
-    }
-
-    async fn update_internal(&mut self, percentage: u8, extra_info: Option<&str>) -> Result<(), anyhow::Error> {
-        // Check rate limiting
+    pub async fn update(
+        &mut self,
+        percentage: u8,
+        extra_info: Option<&str>,
+    ) -> Result<(), anyhow::Error> {
         let now = Instant::now();
-        let mut last_update = self.last_update.lock().await;
-        let should_update = self.message_id.is_none() ||
-            now.duration_since(*last_update) >= self.min_update_interval ||
-            percentage == 100;
-        
-        if !should_update {
-            return Ok(());
-        }
-        
-        *last_update = now;
-        
-        if let Some(message_id) = self.message_id {
-            let progress_text = self.create_progress_bar(percentage, extra_info);
-            
-            // Timeout for update with graceful handling
-            let update_result = timeout(
-                Duration::from_secs(5),
-                self.bot.edit_message_text(self.chat_id, message_id, progress_text)
-            ).await;
-            
-            match update_result {
-                Ok(Ok(_)) => {}, // Success
-                Ok(Err(e)) => {
-                    log::debug!("Progress bar update failed: {}", e);
-                    // Don't break execution due to UI update error
-                },
-                Err(_) => {
-                    log::debug!("Progress bar update timed out");
-                    // Also not critical
-                }
+        let mut last_update = self.lastupdate.lock().await;
+        if self.messageid.is_none()
+            || now.duration_since(*last_update) > self.minupdateinterval
+            || percentage == 100
+        {
+            *last_update = now;
+            if let Some(message_id) = self.messageid {
+                let progress_text = self.create_progress_bar(percentage, extra_info);
+                let _ = self
+                    .bot
+                    .edit_message_text(self.chatid, message_id, progress_text)
+                    .await;
             }
         }
         Ok(())
@@ -103,11 +82,10 @@ impl ProgressBar {
         result
     }
 
-    // Deletes the progress bar (used when everything is ready)
     pub async fn delete(&mut self) -> Result<(), anyhow::Error> {
-        if let Some(message_id) = self.message_id {
-            let _ = self.bot.delete_message(self.chat_id, message_id).await;
-            self.message_id = None;
+        if let Some(message_id) = self.messageid {
+            let _ = self.bot.delete_message(self.chatid, message_id).await;
+            self.messageid = None;
         }
         Ok(())
     }
