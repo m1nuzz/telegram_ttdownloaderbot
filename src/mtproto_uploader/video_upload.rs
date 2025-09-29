@@ -10,9 +10,6 @@ use crate::mtproto_uploader::metadata::get_video_metadata;
 use crate::mtproto_uploader::file_uploader::upload_file_in_parts;
 use crate::mtproto_uploader::message_sender::send_media_with_retry;
 
-// Добавляем импорт для tl функций
-use grammers_tl_types as tl;
-
 impl MTProtoUploader {
     async fn ensure_faststart_video(&self, file_path: &Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         // Create a temporary file for the faststart-optimized video
@@ -50,12 +47,6 @@ impl MTProtoUploader {
         caption: &str,
         progress_bar: &mut ProgressBar,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Проверяем соединение простым запросом перед загрузкой
-        if let Err(e) = self.client.invoke(&tl::functions::help::GetNearestDc {}).await {
-            log::warn!("Connection check failed, may need reconnection: {:?}", e);
-            return Err(Box::new(e));
-        }
-        
         // RAII guard for automatic deletion of temporary faststart file
         struct TempVideoGuard {
             path: Option<std::path::PathBuf>,
