@@ -41,7 +41,26 @@ pub async fn upload_file_in_parts(
             file_total_parts: total_parts as i32,
             bytes: buf,
         };
-        client.invoke(&request).await.map_err(|e| anyhow::anyhow!("saveBigFilePart {} failed: {:?}", part, e))?;
+        
+        let result = client.invoke(&request).await;
+        match result {
+            Ok(success) => {
+                if !success {
+                    return Err(anyhow::anyhow!("saveBigFilePart {} returned false", part).into());
+                }
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                if err_msg.contains("ConnectionReset") || err_msg.contains("read 0 bytes") {
+                    log::error!("Connection lost during upload at part {}/{}, connection requires reset", part, total_parts);
+                    return Err(anyhow::anyhow!(
+                        "saveBigFilePart {} failed due to connection loss: {:?}", part, e
+                    ).into());
+                } else {
+                    return Err(anyhow::anyhow!("saveBigFilePart {} failed: {:?}", part, e).into());
+                }
+            }
+        }
 
         // Calculate progress differently based on file type
         let uploaded = part + 1;

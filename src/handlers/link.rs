@@ -201,6 +201,7 @@ pub async fn link_handler(
                 .await?;
 
             let mut retries = 0;
+            let max_connection_retries = 5; // Больше попыток для ошибок соединения
             let upload_result = loop {
                 let upload_future: Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>> = Box::pin(async {
                     if is_audio {
@@ -225,11 +226,32 @@ pub async fn link_handler(
                 match timeout(UPLOAD_TIMEOUT, upload_future).await {
                     Ok(Ok(val)) => break Ok(val),
                     Ok(Err(e)) => {
+                        let err_msg = e.to_string();
+                        let is_connection_error = err_msg.contains("ConnectionReset") || 
+                                                 err_msg.contains("read 0 bytes") || 
+                                                 err_msg.contains("Connection lost");
                         retries += 1;
-                        if retries >= 3 {
+                        let max_retries = if is_connection_error {
+                            max_connection_retries
+                        } else {
+                            3
+                        };
+                        if retries >= max_retries {
                             break Err(e);
                         }
-                        let delay_ms = (1000 * 2_u64.pow(retries - 1)).min(30000);
+                        // Экспоненциальная задержка, до 60 секунд для ошибок соединения
+                        let base_delay = if is_connection_error {
+                            3000
+                        } else {
+                            1000
+                        };
+                        let max_delay = if is_connection_error {
+                            60000
+                        } else {
+                            30000
+                        };
+                        let delay_ms = (base_delay * 2_u64.pow(retries - 1)).min(max_delay);
+                        log::warn!("Upload error (attempt {}/{}): {}. Retrying in {}ms", retries, max_retries, err_msg, delay_ms);
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }
                     Err(e) => { // timeout
@@ -237,7 +259,8 @@ pub async fn link_handler(
                         if retries >= 3 {
                             break Err(anyhow::Error::new(e));
                         }
-                        let delay_ms = (1000 * 2_u64.pow(retries - 1)).min(30000);
+                        let delay_ms = (2000 * 2_u64.pow(retries - 1)).min(30000);
+                        log::warn!("Upload timeout (attempt {}/3). Retrying in {}ms", retries, delay_ms);
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     }
                 }
