@@ -1,70 +1,13 @@
-use tokio::task::{JoinSet, AbortHandle};
+use tokio::task::JoinSet;
 
 pub struct TaskManager {
     tasks: JoinSet<()>,
-    _max_concurrent: usize,
 }
 
 impl TaskManager {
-    pub fn new(max_concurrent: usize) -> Self {
+    pub fn new(_max_concurrent: usize) -> Self {
         Self {
             tasks: JoinSet::new(),
-            _max_concurrent: max_concurrent,
-        }
-    }
-
-    /// Spawns a new task and automatically cleans up completed tasks
-    #[allow(dead_code)]
-    pub fn spawn<F>(&mut self, task: F) -> AbortHandle
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        // Automatically clean up completed tasks before adding new one
-        self.cleanup_completed();
-
-        // If reached limit, wait for completion of at least one task
-        if self.tasks.len() >= self._max_concurrent {
-            log::warn!("TaskManager at capacity ({}), waiting for task completion", self._max_concurrent);
-            // Force cleanup of one completed task
-            while self.tasks.len() >= self._max_concurrent {
-                if !self.try_join_one() {
-                    // If no completed tasks, let the system continue anyway
-                    log::warn!("All {} tasks still running, continuing anyway", self._max_concurrent);
-                    break;
-                }
-            }
-        }
-        self.tasks.spawn(task)
-    }
-
-    /// Cleans up all completed tasks without blocking
-    #[allow(dead_code)]
-    fn cleanup_completed(&mut self) {
-        let mut cleaned = 0;
-        while self.try_join_one() {
-            cleaned += 1;
-        }
-        if cleaned > 0 {
-            log::debug!("Cleaned up {} completed tasks", cleaned);
-        }
-    }
-
-    /// Tries to get one completed task (non-blocking)
-    #[allow(dead_code)]
-    fn try_join_one(&mut self) -> bool {
-        // Use poll to check for completed tasks non-blocking
-        use std::task::{Context, Poll};
-        use std::pin::Pin;
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        match Pin::new(&mut self.tasks).poll_join_next(&mut cx) {
-            Poll::Ready(Some(result)) => {
-                if let Err(e) = result {
-                    log::error!("Background task failed: {:?}", e);
-                }
-                true
-            }
-            Poll::Ready(None) | Poll::Pending => false,
         }
     }
 
@@ -83,18 +26,6 @@ impl TaskManager {
     pub fn abort_all(&mut self) {
         log::warn!("Aborting all {} tasks", self.tasks.len());
         self.tasks.abort_all();
-    }
-
-    /// Returns number of active tasks
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.tasks.len()
-    }
-
-    /// Checks if tasks set is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
     }
 }
 
