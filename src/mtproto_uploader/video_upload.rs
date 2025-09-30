@@ -57,11 +57,13 @@ impl MTProtoUploader {
                 Self { path: Some(path) }
             }
 
+            #[allow(dead_code)]
             fn path(&self) -> &std::path::Path {
                 self.path.as_ref().unwrap()
             }
 
             // Prevent deletion, if file needs to be kept
+            #[allow(dead_code)]
             fn keep(mut self) {
                 self.path = None;
             }

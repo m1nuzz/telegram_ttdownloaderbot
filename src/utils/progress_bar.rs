@@ -1,12 +1,9 @@
 use anyhow::Result; 
-use std::sync::Arc;
 use teloxide::{
     prelude::*,
     requests::Requester,
     types::{ChatId, MessageId},
 };
-use tokio::sync::Mutex;
-use tokio::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct ProgressBar {
