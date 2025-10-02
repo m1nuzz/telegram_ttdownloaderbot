@@ -7,7 +7,7 @@ use crate::utils::progress_bar::ProgressBar;
 use crate::mtproto_uploader::uploader::MTProtoUploader;
 use crate::mtproto_uploader::thumbnail::generate_thumbnail;
 use crate::mtproto_uploader::metadata::get_video_metadata;
-use crate::mtproto_uploader::file_uploader::upload_file_in_parts;
+use crate::mtproto_uploader::file_uploader::{upload_file_in_parts_with_reconnect, upload_small_file_with_reconnect};
 use crate::mtproto_uploader::message_sender::send_media_with_retry;
 
 impl MTProtoUploader {
@@ -92,8 +92,8 @@ impl MTProtoUploader {
             (file_path.to_path_buf(), None) // Use original file
         };
 
-        // Upload the main video file
-        let (file_id, file_parts) = upload_file_in_parts(&self.client, &video_path, progress_bar, "video").await.map_err(|e| {
+        // Upload the main video file using reconnect mechanism
+        let (file_id, file_parts) = upload_file_in_parts_with_reconnect(self, &video_path, progress_bar, "video").await.map_err(|e| {
             log::error!("Failed to upload video file {:?}: {:?}", file_path, e);
             e
         })?;
@@ -111,15 +111,15 @@ impl MTProtoUploader {
             e
         })?;
 
-        // Upload the thumbnail using the small file method
-        let (thumbnail_file_id, thumbnail_parts) = crate::mtproto_uploader::file_uploader::upload_small_file(&self.client, &thumbnail_path).await.map_err(|e| {
+        // Upload the thumbnail using the reconnect mechanism
+        let (thumbnail_file_id, thumbnail_parts) = upload_small_file_with_reconnect(self, &thumbnail_path).await.map_err(|e| {
             log::error!("Failed to upload thumbnail file {:?}: {:?}", thumbnail_path, e);
             e
         })?;
 
         // Send the media with retry logic
         send_media_with_retry(
-            &self.client,
+            &self.client, // Pass the Arc<Mutex<Client>> directly
             chat_id,
             username,
             file_id,

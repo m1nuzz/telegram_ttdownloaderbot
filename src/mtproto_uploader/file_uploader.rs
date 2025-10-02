@@ -7,6 +7,33 @@ use anyhow;
 use rand;
 
 use crate::utils::progress_bar::ProgressBar;
+use crate::mtproto_uploader::uploader::MTProtoUploader;
+
+pub async fn upload_file_in_parts_with_reconnect(
+    mtproto_uploader: &MTProtoUploader,
+    file_path: &Path,
+    progress_bar: &mut ProgressBar,
+    file_type: &str, // "video" or "thumbnail" to customize progress calculation
+) -> Result<(i64, i32), Box<dyn std::error::Error + Send + Sync>> {  // Return (file_id, parts_count)
+    let file_path = file_path.to_path_buf();
+    let file_type = file_type.to_string();
+    let progress_bar_clone = progress_bar.clone();
+    
+    mtproto_uploader.with_reconnect_retry(|| {
+        let mtproto_uploader = mtproto_uploader.clone();
+        let file_path = file_path.clone();
+        let file_type = file_type.clone();
+        let mut progress_bar = progress_bar_clone.clone();
+        
+        Box::pin(async move {
+            // Get access to the client
+            let client_guard = mtproto_uploader.client.lock().await;
+            let result = upload_file_in_parts(&*client_guard, &file_path, &mut progress_bar, &file_type).await;
+            drop(client_guard); // Release the lock early
+            result
+        })
+    }).await
+}
 
 pub async fn upload_file_in_parts(
     client: &Client,
@@ -54,7 +81,9 @@ pub async fn upload_file_in_parts(
                 if err_msg.contains("ConnectionReset") || err_msg.contains("read 0 bytes") {
                     log::error!("Connection lost during upload at part {}/{}, connection requires reset", part, total_parts);
                     return Err(anyhow::anyhow!(
-                        "saveBigFilePart {} failed due to connection loss: {:?}", part, e
+                        "saveBigFilePart {} failed due to connection loss: {:?}",
+                        part,
+                        e
                     ).into());
                 } else {
                     return Err(anyhow::anyhow!("saveBigFilePart {} failed: {:?}", part, e).into());
@@ -81,6 +110,26 @@ pub async fn upload_file_in_parts(
 }
 
 // Function specifically for uploading small files (like thumbnails) that don't require multipart upload
+pub async fn upload_small_file_with_reconnect(
+    mtproto_uploader: &MTProtoUploader,
+    file_path: &Path,
+) -> Result<(i64, i32), Box<dyn std::error::Error + Send + Sync>> {  // Return (file_id, parts_count)
+    let file_path = file_path.to_path_buf();
+    
+    mtproto_uploader.with_reconnect_retry(|| {
+        let mtproto_uploader = mtproto_uploader.clone();
+        let file_path = file_path.clone();
+        
+        Box::pin(async move {
+            // Get access to the client
+            let client_guard = mtproto_uploader.client.lock().await;
+            let result = upload_small_file(&*client_guard, &file_path).await;
+            drop(client_guard); // Release the lock early
+            result
+        })
+    }).await
+}
+
 pub async fn upload_small_file(
     client: &Client,
     file_path: &Path,
@@ -104,8 +153,13 @@ pub async fn upload_small_file(
         
         Ok((file_id, 1)) // Return file_id and 1 part
     } else {
-        // If file is larger than 512KB, fall back to multipart upload
-        let (file_id, parts_count) = upload_file_in_parts(client, file_path, &mut crate::utils::progress_bar::ProgressBar::new_silent(), "thumbnail").await?;
+        // If file is larger than 512KB, fall back to multipart upload using reconnection mechanism
+        let (file_id, parts_count) = upload_file_in_parts(
+            client, 
+            file_path, 
+            &mut crate::utils::progress_bar::ProgressBar::new_silent(), 
+            "thumbnail"
+        ).await?;
         Ok((file_id, parts_count))
     }
 }

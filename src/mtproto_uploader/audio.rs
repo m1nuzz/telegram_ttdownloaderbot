@@ -4,14 +4,13 @@ use anyhow;
 use grammers_tl_types as tl;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use std::fs::File;
-use std::io::{BufReader, Read};
 use std::path::Path;
 use log;
 
 use crate::utils::progress_bar::ProgressBar;
 
 use crate::mtproto_uploader::uploader::MTProtoUploader; // Import MTProtoUploader
+use crate::mtproto_uploader::file_uploader::upload_file_in_parts_with_reconnect;
 
 impl MTProtoUploader {
     pub async fn upload_audio(
@@ -22,42 +21,23 @@ impl MTProtoUploader {
         caption: &str,
         progress_bar: &mut ProgressBar,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let input_peer = resolve_peer(&self.client, chat_id, username.as_deref()).await?;
+        // Upload the audio file using reconnect mechanism
+        let (file_id, total_parts) = upload_file_in_parts_with_reconnect(self, file_path, progress_bar, "audio").await.map_err(|e| {
+            log::error!("Failed to upload audio file {:?}: {:?}", file_path, e);
+            e
+        })?;
 
-        let file = File::open(file_path)?;
-        let mut reader = BufReader::new(file);
-        let file_size = file_path.metadata()?.len() as usize;
-        let chunk_size = 512 * 1024; // 512 KB
-        let total_parts = (file_size + chunk_size - 1) / chunk_size;
-
-        let mut rng = ChaCha8Rng::from_os_rng();
-        let file_id: i64 = rand::Rng::random(&mut rng);
-
-        // Uploading file in parts
-        for part in 0..total_parts {
-            let mut bytes = vec![0; chunk_size];
-            let bytes_read = reader.read(&mut bytes)?;
-            bytes.truncate(bytes_read);
-
-            let request = tl::functions::upload::SaveBigFilePart {
-                file_id,
-                file_part: part as i32,
-                file_total_parts: total_parts as i32,
-                bytes,
-            };
-            self.client.invoke(&request).await.map_err(|e| anyhow::anyhow!("saveBigFilePart {} failed: {:?}", part, e))?;
-
-            // 2) calculate overall progress (80..=99)
-            let uploaded = part + 1;
-            let overall = 80 + ((uploaded as f64 / total_parts as f64) * 19.0).floor() as u8;
-            // showing "real" upload
-            let info = format!("📤 Uploading... {}/{} parts", uploaded, total_parts);
-            let _ = progress_bar.update(overall.min(99), Some(&info)).await;
-        }
+        // Access the actual client through the mutex
+        let client = self.client.lock().await;
+        
+        let input_peer = resolve_peer(&self.client, chat_id, username.as_deref()).await.map_err(|e| {
+            log::error!("Failed to resolve peer: {:?}", e);
+            e
+        })?;
 
         let input_file = tl::enums::InputFile::Big(tl::types::InputFileBig {
             id: file_id,
-            parts: total_parts as i32,
+            parts: total_parts,
             name: file_path
                 .file_name()
                 .and_then(|os_str| os_str.to_str())
@@ -97,6 +77,8 @@ impl MTProtoUploader {
             ttl_seconds: None,
         });
 
+        let mut rng = ChaCha8Rng::from_os_rng();
+        
         // Sending message
         let request = tl::functions::messages::SendMedia {
             silent: false,
@@ -117,7 +99,12 @@ impl MTProtoUploader {
             invert_media: false,
             quick_reply_shortcut: None,
         };
-        self.client.invoke(&request).await?;
+        
+        client.invoke(&request).await.map_err(|e| {
+            log::error!("Failed to send audio: {:?}", e);
+            e
+        })?;
+        
         Ok(())
     }
 }

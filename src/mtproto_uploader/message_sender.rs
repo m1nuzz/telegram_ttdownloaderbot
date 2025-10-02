@@ -1,12 +1,13 @@
 use grammers_client::{Client, InvocationError};
 use grammers_tl_types as tl;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use anyhow;
+use tokio::sync::Mutex;
 
 use crate::peers::resolve_peer;
 
 pub async fn send_media_with_retry(
-    client: &Client,
+    client: &Arc<Mutex<Client>>,
     chat_id: i64,
     username: Option<String>,
     file_id: i64,
@@ -100,25 +101,28 @@ pub async fn send_media_with_retry(
     loop {
         attempts += 1;
         let random_id: i64 = rand::random();
-        match client.invoke(&tl::functions::messages::SendMedia {
-            silent: false,
-            background: false,
-            clear_draft: false,
-            noforwards: false,
-            update_stickersets_order: false,
-            peer: input_peer.clone(), // Clone input_peer for retries
-            reply_to: None,
-            media: media.clone(), // Clone media for retries
-            message: caption.to_string(),
-            random_id,
-            reply_markup: None,
-            entities: Some(Vec::new()),
-            schedule_date: None,
-            send_as: None,
-            effect: None,
-            invert_media: false,
-            quick_reply_shortcut: None,
-        }).await {
+        match {
+            let actual_client = client.lock().await;
+            actual_client.invoke(&tl::functions::messages::SendMedia {
+                silent: false,
+                background: false,
+                clear_draft: false,
+                noforwards: false,
+                update_stickersets_order: false,
+                peer: input_peer.clone(), // Clone input_peer for retries
+                reply_to: None,
+                media: media.clone(), // Clone media for retries
+                message: caption.to_string(),
+                random_id,
+                reply_markup: None,
+                entities: Some(Vec::new()),
+                schedule_date: None,
+                send_as: None,
+                effect: None,
+                invert_media: false,
+                quick_reply_shortcut: None,
+            }).await
+        } {
             Ok(_) => break,
             Err(InvocationError::Rpc(e)) if e.name.starts_with("FLOOD_WAIT_") => {
                 let secs = e.code as u64;

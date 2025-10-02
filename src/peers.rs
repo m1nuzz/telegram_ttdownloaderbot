@@ -1,12 +1,17 @@
 use anyhow::{anyhow, Result};
 use grammers_client::Client;
 use grammers_tl_types as tl;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub async fn resolve_peer(
-    client: &Client,
+    client: &Arc<Mutex<Client>>,
     chat_id: i64,
     username: Option<&str>,
 ) -> Result<tl::enums::InputPeer> {
+    // Access the actual client through the mutex
+    let actual_client = client.lock().await;
+
     // 1) Basic group: отрицательный id, но не канал (-100...)
     if chat_id < 0 && !format!("{}", chat_id).starts_with("-100") {
         let raw_id = chat_id.abs() as i32; // basic group id без -100 префикса
@@ -16,7 +21,7 @@ pub async fn resolve_peer(
     // 2) Пользователь или канал/супергруппа: резолвим по username (ботам dialogs запрещён)
     if let Some(un) = username {
         // contacts.resolveUsername доступен ботам
-        let res = client.invoke(&tl::functions::contacts::ResolveUsername { username: un.to_string() }).await.map_err(|e| anyhow!("contacts.resolveUsername failed for @{}: {:?}", un, e))?;
+        let res = actual_client.invoke(&tl::functions::contacts::ResolveUsername { username: un.to_string() }).await.map_err(|e| anyhow!("contacts.resolveUsername failed for @{}: {:?}", un, e))?;
         let tl::enums::contacts::ResolvedPeer::Peer(r) = res;
             // Пытаемся сопоставить возвращённый peer с users/chats чтобы достать access_hash
             match r.peer {
